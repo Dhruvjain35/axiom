@@ -83,6 +83,49 @@ Alongside it, on the same Cloud cluster:
 | `scripts/preflight.py` | **16/16 blocking gates pass** (1 advisory characterization) |
 | `pytest` | **49 passed** in 222 s — every crash window and structural invariant |
 
+## The counterexample
+
+The claim "most agent frameworks would refund twice here" is easy to assert and easy to
+discount, so AXIOM ships the comparison instead. `scripts/counterexample.py` runs the same
+order, through the same crash, at the same instant, against the same provider — once with a
+conversation-transcript agent and once with AXIOM:
+
+```
+================================================================================
+                      TRANSCRIPT MEMORY                   AXIOM
+================================================================================
+killed in W4          yes                                 yes
+memory consulted      2 transcript turns                  receipt + 5 recalled memories
+policy gate           none — refunds $300 unattended      sent to a human first
+recovery decision     retry — cannot know if it landed    RESEND under the same key
+idempotency key       newly generated each attempt        axm_3e9d1a3bfdb24e74c11de9…
+fence (lease_epoch)   n/a                                 2 -> 3
+
+REFUNDS CREATED       2                                   1
+idempotent replays    0                                   1
+DOLLARS OUT           $600.00                             $300.00
+================================================================================
+```
+
+**The baseline is not a strawman, and that is the point.** It persists its transcript to
+disk with `fsync`, re-reads it on restart rather than starting blank, checks for evidence it
+already acted, and records its intent *before* calling the provider — which is the best you
+can do without a transaction. It still pays out twice, for a structural reason:
+
+> After the crash, its transcript says *"I intended to refund order X"* and contains no
+> completion. Two worlds are consistent with that and it cannot tell them apart: the call
+> never went out, or the call went out and the process died before the write. It has to
+> guess. And it cannot reuse the original idempotency key, because nothing ever minted that
+> key anywhere durable.
+
+AXIOM faces the identical ambiguity and does not have to guess, because the receipt and the
+state transition committed together. "Did I already act?" is a question the database
+answers, not one the agent infers from prose.
+
+The run is deterministic — both agents are killed at exactly window W4 — so this is an
+argument, not an anecdote. The script fails loudly with `INCONCLUSIVE` rather than `PASS` if
+the baseline does not actually double-refund, so a rigged run cannot masquerade as a result.
+
 The demo **SIGKILL**s a random live worker every 1.8 seconds. Not `SIGTERM` — no signal
 handler runs, no `finally` block runs, no lease is politely released. That is what an OOM
 kill, a spot reclamation and a `docker kill` all look like.
