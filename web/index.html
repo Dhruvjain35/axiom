@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AXIOM — Mission Control</title>
+<link rel="stylesheet" href="/styles.css">
+<!-- An empty data: icon. Without it the browser requests /favicon.ico, the API 404s it,
+     and the only red line in a demo console is a missing image. -->
+<link rel="icon" href="data:,">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ───────────────────────────────────────────────────────────── topbar ── -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">AXIOM</span>
+      <span class="brand-sub">MISSION&nbsp;CONTROL</span>
+    </div>
+
+    <div class="health" id="health">
+      <span class="hx" data-k="db"><i class="dot"></i>DB</span>
+      <span class="hx" data-k="provider"><i class="dot"></i>PROVIDER</span>
+      <span class="hx" data-k="poll"><i class="dot"></i>POLL</span>
+      <span class="hver" id="hver">—</span>
+    </div>
+
+    <div class="topright">
+      <div class="demo">
+        <button class="btn" id="btn-seed" title="POST /api/demo/seed">SEED</button>
+        <button class="btn btn-danger" id="btn-reset" title="POST /api/demo/reset">RESET</button>
+      </div>
+      <span class="clock" id="clock">--:--:--</span>
+    </div>
+  </header>
+
+  <!-- ──────────────────────────────────────────────────────── mission strip ── -->
+  <section class="mission">
+    <div class="mission-id">
+      <h1 class="mission-title" id="m-title">no mission</h1>
+      <p class="mission-goal" id="m-goal">waiting for /api/mission</p>
+      <div class="mission-meta">
+        <span class="kv"><b>STATE</b><span id="m-state">—</span></span>
+        <span class="kv"><b>MISSION</b><span id="m-uuid" class="uuid">—</span></span>
+        <span class="kv"><b>STARTED</b><span id="m-created">—</span></span>
+      </div>
+    </div>
+
+    <div class="mission-budget">
+      <div class="lbl-row">
+        <span class="lbl">BUDGET AUTHORITY</span>
+        <span class="budget-nums" id="b-nums">— / —</span>
+      </div>
+      <div class="bar" id="b-bar"><div class="bar-fill" id="b-fill"></div><div class="bar-ticks"></div></div>
+      <div class="statestrip" id="statestrip"></div>
+    </div>
+
+    <div class="moneyshot" id="moneyshot">
+      <span class="lbl">DUPLICATE REFUNDS</span>
+      <div class="bignum" id="dupes">—</div>
+      <div class="money-sub">
+        <span><b id="p-refunds">—</b> refunds issued</span>
+        <span><b id="p-replays">—</b> idempotent replays</span>
+        <span><b id="p-total">—</b> total refunded</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────── body ── -->
+  <main class="body">
+
+    <!-- ── left rail ── -->
+    <aside class="rail">
+
+      <section class="panel" id="panel-workers">
+        <div class="panel-head">
+          <h2>WORKER POOL</h2>
+          <span class="panel-note" id="workers-note">—</span>
+        </div>
+        <div class="panel-body" id="workers"></div>
+      </section>
+
+      <section class="panel" id="panel-unsettled">
+        <div class="panel-head">
+          <h2>UNSETTLED RECEIPTS</h2>
+          <span class="panel-note" id="unsettled-note">—</span>
+        </div>
+        <div class="panel-body" id="unsettled"></div>
+        <div class="panel-foot">effects that may exist in the world but are not yet recorded</div>
+      </section>
+
+      <section class="panel" id="panel-rewind">
+        <div class="panel-head">
+          <h2>REWIND</h2>
+          <span class="panel-note">AS OF SYSTEM TIME</span>
+        </div>
+        <div class="panel-body">
+          <div class="rewind-ctl" id="rewind-ctl">
+            <button class="btn btn-xs" data-secs="30">30s</button>
+            <button class="btn btn-xs" data-secs="120">2m</button>
+            <button class="btn btn-xs" data-secs="600">10m</button>
+            <button class="btn btn-xs" data-secs="3600">1h</button>
+          </div>
+          <div id="rewind-out" class="rewind-out"><span class="empty">pick an offset to read the cluster as it was</span></div>
+        </div>
+      </section>
+
+    </aside>
+
+    <!-- ── main column ── -->
+    <section class="center">
+      <nav class="tabs" id="tabs">
+        <button class="tab is-on" data-view="ops"><span class="tab-n">1</span>OPERATIONS</button>
+        <button class="tab" data-view="ledger"><span class="tab-n">2</span>LEDGER</button>
+        <button class="tab" data-view="memory"><span class="tab-n">3</span>MEMORY</button>
+        <button class="tab" data-view="approvals"><span class="tab-n">4</span>APPROVALS<i class="badge" id="appr-badge" hidden>0</i></button>
+        <button class="tab" data-view="spec"><span class="tab-n">5</span>CRASH WINDOWS</button>
+      </nav>
+
+      <div class="views">
+
+        <!-- ══ OPERATIONS ══ -->
+        <div class="view is-on" data-view="ops">
+          <div class="view-head">
+            <div class="head-l">
+              <h3 class="view-title">TASK GRID</h3>
+              <span class="view-sub" id="grid-note">—</span>
+            </div>
+            <div class="fence-meter" title="lease_epoch incremented: another worker took the task over and the previous lease holder can no longer settle it">
+              <span class="lbl">FENCE ADVANCES</span>
+              <b id="fence-count">0</b>
+              <span class="fence-delta" id="fence-delta"></span>
+            </div>
+          </div>
+          <div class="taskgrid" id="taskgrid"></div>
+          <div class="view-foot">
+            <div class="legend" id="legend"></div>
+            <span class="foot-key"><b>s</b>shard <b>a</b>attempt <b>e</b>lease_epoch</span>
+          </div>
+        </div>
+
+        <!-- ══ LEDGER ══ -->
+        <div class="view" data-view="ledger">
+          <div class="view-head">
+            <h3 class="view-title">EXTERNAL PROVIDER LEDGER</h3>
+            <span class="view-sub">separate database · no shared transaction · the only source of truth about the real world</span>
+          </div>
+          <div class="scroller"><table class="tbl" id="ledger-tbl"></table></div>
+        </div>
+
+        <!-- ══ MEMORY ══ -->
+        <div class="view" data-view="memory">
+          <form class="recall" id="recall-form">
+            <div class="recall-row">
+              <label class="fld grow">
+                <span>RECALL QUERY</span>
+                <input type="text" id="r-query" value="agent died mid-refund, did the money move" autocomplete="off">
+              </label>
+              <label class="fld">
+                <span>CLASS</span>
+                <select id="r-class">
+                  <option value="EPISODIC">EPISODIC</option>
+                  <option value="SEMANTIC">SEMANTIC</option>
+                </select>
+              </label>
+              <label class="fld">
+                <span>CONTEXT KEY</span>
+                <input type="text" id="r-ctx" value="state:ACTION_PREPARED" autocomplete="off">
+              </label>
+              <label class="fld fld-k">
+                <span>K</span>
+                <input type="number" id="r-k" value="5" min="1" max="25">
+              </label>
+              <button class="btn btn-go" type="submit">RECALL</button>
+            </div>
+            <div class="recall-status">
+              <span class="idx" id="idx-lamp"><i class="dot"></i><span id="idx-text">plan_uses_vector_index —</span></span>
+              <span class="recall-delta" id="recall-delta"></span>
+            </div>
+          </form>
+
+          <div class="recall-hits" id="recall-hits"></div>
+
+          <div class="view-head mem-head">
+            <h3 class="view-title">MEMORY STORE</h3>
+            <label class="chk"><input type="checkbox" id="mem-inadmissible" checked><span>show inadmissible</span></label>
+          </div>
+          <div class="scroller"><table class="tbl tbl-mem" id="mem-tbl"></table></div>
+        </div>
+
+        <!-- ══ APPROVALS ══ -->
+        <div class="view" data-view="approvals">
+          <div class="view-head">
+            <h3 class="view-title">APPROVALS INBOX</h3>
+            <span class="view-sub">execution is blocked at AWAITING_APPROVAL until a human decides</span>
+          </div>
+          <div class="approvals" id="approvals"></div>
+        </div>
+
+        <!-- ══ SPEC ══ -->
+        <div class="view" data-view="spec">
+          <div class="spec-head">
+            <h3 class="spec-title">Crash windows</h3>
+            <p class="spec-lede">Every instant at which this system can die, and the defined outcome of dying
+            there. The guarantee is <em>effectively-once via idempotency receipts</em> — never exactly-once
+            execution, which is not obtainable against a remote provider.</p>
+          </div>
+          <div class="scroller"><div class="spec-list" id="spec-tbl"></div></div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ── event stream ── -->
+    <aside class="stream">
+      <div class="panel-head">
+        <h2>EVENT JOURNAL</h2>
+        <span class="panel-note" id="ev-note">—</span>
+      </div>
+      <div class="events" id="events"></div>
+      <div class="panel-foot">append-only · written in the same transaction as the transition</div>
+    </aside>
+
+  </main>
+
+  <!-- ─────────────────────────────────────────────────────────────── drawer ── -->
+  <div class="drawer" id="drawer" hidden>
+    <div class="drawer-head">
+      <div>
+        <h2 id="d-key">—</h2>
+        <span class="uuid" id="d-id">—</span>
+      </div>
+      <button class="btn btn-x" id="d-close">CLOSE</button>
+    </div>
+    <div class="drawer-body" id="d-body"></div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

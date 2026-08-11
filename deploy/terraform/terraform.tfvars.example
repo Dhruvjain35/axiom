@@ -1,0 +1,43 @@
+# AXIOM :: copy to terraform.tfvars and edit.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# NOTE: the repo root .gitignore currently covers .terraform/ and *.tfstate but
+# NOT *.tfvars. Nothing in this file is a secret (the database DSN lives in SSM
+# and is referenced by name), but add `*.tfvars` to .gitignore before you put
+# account ids in it out of habit.
+
+# Required. Pin a tag; scripts/deploy.sh tags with the git sha.
+image_uri = "704229156617.dkr.ecr.us-east-1.amazonaws.com/axiom:REPLACE_ME"
+
+region      = "us-east-1"
+name_prefix = "axiom"
+
+# Leave both empty to use the default VPC and its default subnets.
+#
+# One real trap: Fargate is not offered in every availability zone of the
+# default VPC — us-east-1e is the classic example. If a task sticks in
+# PROVISIONING with "Fargate is not supported in this availability zone",
+# pin the subnets to AZs a/b/c explicitly instead of taking all six.
+#
+# vpc_id     = "vpc-0b64e751ac350b6c8"
+# subnet_ids = ["subnet-09fa52fc52d643886", "subnet-09a4839fe9d7f7eca", "subnet-07e6e5c65a348e3a9"]
+
+# HTTPS needs a domain you control plus a free ACM certificate for it. Without
+# one the demo answers on http://<alb-dns-name>, which is a valid submission URL.
+# acm_certificate_arn = "arn:aws:acm:us-east-1:704229156617:certificate/..."
+
+# The DSN written by scripts/provision_ccloud.sh, stored as an SSM SecureString
+# by scripts/deploy.sh. Never put the DSN itself in this file.
+database_url_parameter_name = "/axiom/prod/DATABASE_URL"
+
+# false = the deployed demo really calls Bedrock. Set true only to prove the
+# deployment works before Bedrock model access is granted.
+axiom_offline = false
+
+# $7.20/month each. Two is the minimum that makes the recovery path visible.
+worker_count = 2
+
+# ARM64 requires `docker buildx build --platform linux/arm64`; scripts/deploy.sh
+# does that by default.
+cpu_architecture = "ARM64"

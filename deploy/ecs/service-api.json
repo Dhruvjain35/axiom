@@ -1,0 +1,35 @@
+{
+  "cluster": "axiom",
+  "serviceName": "axiom-api",
+  "taskDefinition": "axiom-api",
+  "desiredCount": 1,
+  "launchType": "FARGATE",
+  "enableExecuteCommand": true,
+  "healthCheckGracePeriodSeconds": 60,
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": ["SUBNET_A", "SUBNET_B"],
+      "securityGroups": ["SG_SERVICE"],
+      "assignPublicIp": "ENABLED"
+    }
+  },
+  "loadBalancers": [
+    {
+      "targetGroupArn": "arn:aws:elasticloadbalancing:REGION:ACCOUNT_ID:targetgroup/axiom-api/TG_ID",
+      "containerName": "api",
+      "containerPort": 8000
+    }
+  ],
+  "deploymentConfiguration": {
+    "minimumHealthyPercent": 100,
+    "maximumPercent": 200,
+    "deploymentCircuitBreaker": {
+      "enable": true,
+      "rollback": true
+    }
+  },
+  "propagateTags": "SERVICE",
+  "tags": [
+    { "key": "Project", "value": "axiom" }
+  ]
+}

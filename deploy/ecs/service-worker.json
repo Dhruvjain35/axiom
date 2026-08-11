@@ -1,0 +1,27 @@
+{
+  "cluster": "axiom",
+  "serviceName": "axiom-worker",
+  "taskDefinition": "axiom-worker",
+  "desiredCount": 2,
+  "launchType": "FARGATE",
+  "enableExecuteCommand": true,
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": ["SUBNET_A", "SUBNET_B"],
+      "securityGroups": ["SG_SERVICE"],
+      "assignPublicIp": "ENABLED"
+    }
+  },
+  "deploymentConfiguration": {
+    "minimumHealthyPercent": 0,
+    "maximumPercent": 100,
+    "deploymentCircuitBreaker": {
+      "enable": true,
+      "rollback": true
+    }
+  },
+  "propagateTags": "SERVICE",
+  "tags": [
+    { "key": "Project", "value": "axiom" }
+  ]
+}

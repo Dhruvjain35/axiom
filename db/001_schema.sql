@@ -1,6 +1,7 @@
 -- =====================================================================================
 -- AXIOM :: core schema
--- Target: CockroachDB v25.4+ (vector indexing GA in v25.4; validated on v25.4.14)
+-- Target: CockroachDB v25.4+ (vector indexing GA in v25.4).
+-- Applied clean and exercised end-to-end on v26.2.3; DDL also accepted on Cloud v26.2.5.
 --
 -- Every non-obvious choice below is commented with WHY, because the people reading
 -- this wrote the database. The recurring themes:

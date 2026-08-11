@@ -1,0 +1,231 @@
+# =============================================================================
+# AXIOM — the whole system, one command.
+#
+#     docker compose up --build
+#     open http://localhost:8000
+#
+# This is the reproduction path. A judge with Docker and nothing else gets a
+# CockroachDB node, the schema, seeded demo data, the API, and three worker
+# agents, with no AWS account and no CockroachDB Cloud signup — AXIOM_OFFLINE=1
+# swaps Bedrock for the deterministic local stand-ins, and the engine cannot tell
+# the difference (that is the point of the provider interfaces in embeddings.py
+# and llm.py).
+#
+# To watch the actual claim of the project — crashes producing zero duplicate
+# refunds — stop the steady-state workers first so the kill count in the output
+# is the real one, then run the chaos profile:
+#
+#     docker compose stop worker
+#     docker compose --profile chaos run --rm chaos
+#
+# Port collisions: every published port is overridable, because the machine that
+# built this already runs a CockroachDB node on 26257.
+#
+#     AXIOM_CRDB_PORT=26258 AXIOM_CRDB_UI_PORT=8082 docker compose up
+# =============================================================================
+
+name: axiom
+
+# --------------------------------------------------------------------- shared --
+# The three application services take an identical environment. Duplicating it
+# three times is how the API ends up talking to a different database than the
+# workers after somebody edits one copy.
+x-axiom-env: &axiom-env
+  # `crdb` is the compose service name; Docker's embedded DNS resolves it.
+  DATABASE_URL: postgresql://root@crdb:26257/axiom?sslmode=disable
+  # The provider is a DIFFERENT DATABASE on the same cluster, reached over its
+  # own connection with autocommit. Same cluster is a demo convenience; the
+  # separation that matters is the transaction boundary, not the hostname.
+  PROVIDER_DATABASE_URL: postgresql://root@crdb:26257/provider?sslmode=disable
+  # 1 = deterministic embeddings + rule-based triage, zero AWS calls, zero cost.
+  # Set AXIOM_OFFLINE=0 in your shell and export AWS credentials to run the same
+  # code against Bedrock.
+  AXIOM_OFFLINE: ${AXIOM_OFFLINE:-1}
+  AWS_REGION: ${AWS_REGION:-us-east-1}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+
+x-axiom-image: &axiom-image
+  image: ${AXIOM_IMAGE:-axiom:local}
+  build:
+    context: .
+    args:
+      GIT_SHA: ${GIT_SHA:-compose}
+
+services:
+
+  # ------------------------------------------------------------------- crdb --
+  crdb:
+    image: cockroachdb/cockroach:${CRDB_VERSION:-v26.2.3}
+    # v25.4 is the floor: C-SPANN vector indexing is GA there and db/001_schema.sql
+    # will not apply without it.
+    # `--listen-addr=:26257`, not `0.0.0.0:26257`. v26.2 in --insecure mode rejects an
+    # explicit non-loopback hostname outright — `error: hostname of listen_addr must be
+    # "127.0.0.1" or "localhost"` — but accepts the empty host, which Go binds to every
+    # interface. Verified by connecting from a second container on this network.
+    command: >
+      start-single-node
+      --insecure
+      --store=/cockroach/cockroach-data
+      --listen-addr=:26257
+      --http-addr=:8080
+    ports:
+      - "${AXIOM_CRDB_PORT:-26257}:26257"
+      # The DB Console. Worth opening during the demo: the claim index and the
+      # SERIALIZABLE retry counters are visible there, live.
+      - "${AXIOM_CRDB_UI_PORT:-8080}:8080"
+    volumes:
+      - crdb-data:/cockroach/cockroach-data
+    healthcheck:
+      # A real SQL round-trip, not a TCP probe. The listener accepts connections
+      # several seconds before the node will answer a query, and `migrate` runs
+      # the moment this reports healthy.
+      test: ["CMD", "/cockroach/cockroach", "sql", "--insecure",
+             "--host=localhost:26257", "-e", "SELECT 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+
+  # ---------------------------------------------------------------- migrate --
+  # Runs once and exits. Uses the cockroach image rather than the AXIOM image
+  # because the schema is applied by the database's own client, exactly as
+  # scripts/provision_ccloud.sh does against CockroachDB Cloud — one migration
+  # path, not two.
+  migrate:
+    image: cockroachdb/cockroach:${CRDB_VERSION:-v26.2.3}
+    depends_on:
+      crdb:
+        condition: service_healthy
+    volumes:
+      - ./db:/schema:ro
+    entrypoint: ["/bin/sh", "-euc"]
+    # A LIST holding one block scalar, not a bare block scalar. Compose parses a
+    # string `command:` as a shell word list, which would hand `sh -c` only the
+    # first word as its script and silently exit 0 — the migration would appear to
+    # succeed and the schema would not exist.
+    #
+    # The existence probes are not belt-and-braces. `docker compose up` re-runs an
+    # exited one-shot service every time, and 001_schema.sql is not idempotent
+    # (CockroachDB has no CREATE TYPE ... IF NOT EXISTS, so the enums fail with
+    # `type "axiom.public.mission_state" already exists` on a second apply). One
+    # sentinel table per file, checked before applying it, makes the second
+    # `docker compose up` a no-op instead of a red herring.
+    # `$$SQL` is the Compose escape for a literal `$`. A single `$` is interpolated
+    # by Compose itself before the container ever sees it, which turns the guard
+    # into `-e 'SELECT ...'` with no binary in front of it: exit 127.
+    command:
+      - |
+        SQL="/cockroach/cockroach sql --insecure --host=crdb:26257"
+        if $$SQL -e 'SELECT 1 FROM axiom.axiom_task LIMIT 1' >/dev/null 2>&1; then
+          echo 'migrate: axiom schema already present, skipping 001_schema.sql'
+        else
+          echo 'migrate: applying 001_schema.sql'
+          $$SQL -f /schema/001_schema.sql
+        fi
+        if $$SQL -e 'SELECT 1 FROM provider.provider_refund LIMIT 1' >/dev/null 2>&1; then
+          echo 'migrate: provider schema already present, skipping 003_provider.sql'
+        else
+          echo 'migrate: applying 003_provider.sql'
+          $$SQL -f /schema/003_provider.sql
+        fi
+        # 002 runs LAST, not in numerical order: it grants CONNECT on the
+        # `provider` database, which 003 is what creates. It needs no guard —
+        # every statement in it is CREATE ... IF NOT EXISTS, GRANT, or REVOKE.
+        echo 'migrate: applying 002_audit_role.sql'
+        $$SQL -f /schema/002_audit_role.sql
+    restart: "no"
+
+  # ------------------------------------------------------------------- seed --
+  # Also runs once and exits: one mission, 30 order exceptions, a body of prior
+  # memories to retrieve, and a budget. --reset makes `docker compose up` a
+  # repeatable demo rather than an accumulating one.
+  seed:
+    <<: *axiom-image
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment: *axiom-env
+    command: ["python", "-m", "axiom.seed", "--reset", "--tasks", "${AXIOM_SEED_TASKS:-30}"]
+    restart: "no"
+
+  # -------------------------------------------------------------------- api --
+  api:
+    <<: *axiom-image
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment: *axiom-env
+    ports:
+      - "${AXIOM_API_PORT:-8000}:8000"
+    # Inherits the image HEALTHCHECK (GET /api/health).
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------- worker --
+  # Three of them, no shard assignment: an empty --shards list means "claim from
+  # every shard", and SKIP LOCKED plus the fencing token make that safe. Shard
+  # pinning is a throughput knob for many workers, not a correctness mechanism.
+  worker:
+    <<: *axiom-image
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment: *axiom-env
+    command: ["python", "-m", "axiom.worker"]
+    deploy:
+      replicas: ${AXIOM_WORKERS:-3}
+    # Overrides the image's HTTP healthcheck: a worker has no socket to probe,
+    # and the only failure worth restarting for is "cannot reach the cluster".
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "from axiom import db; db.tx(lambda c: c.execute('SELECT 1'), readonly=True)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # `unless-stopped` is doing real work here: it is how a SIGKILLed worker
+    # comes back, which is what ECS does in production and what makes
+    # `docker kill --signal=KILL axiom-worker-1` a demo instead of an outage.
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ chaos --
+  # Profiled off: it is a one-shot audit, not a service.
+  #
+  #     docker compose stop worker
+  #     docker compose --profile chaos run --rm chaos
+  #
+  # Spawns its own workers, SIGKILLs them on a timer, waits for every task to
+  # reach a terminal state, then reads the provider's ledger. It fails loudly on
+  # duplicate refunds AND on zero replays — zero replays would mean the kills
+  # never landed in a dangerous window, which proves nothing.
+  chaos:
+    <<: *axiom-image
+    profiles: ["chaos"]
+    # Depends on `migrate`, not `seed`: chaos_demo.py seeds its own mission, and
+    # `docker compose run` starts every dependency, so depending on seed would
+    # plant a second mission nobody asked for.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment: *axiom-env
+    command: ["python", "scripts/chaos_demo.py", "--workers", "3", "--kill-every", "1.8", "--quiet"]
+    restart: "no"
+
+  # -------------------------------------------------------------- preflight --
+  # The 17 gates that assert the schema, the vector index plans, and the
+  # transaction semantics against whatever cluster DATABASE_URL points at.
+  #
+  #     docker compose --profile preflight run --rm preflight
+  preflight:
+    <<: *axiom-image
+    profiles: ["preflight"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment: *axiom-env
+    command: ["python", "scripts/preflight.py"]
+    restart: "no"
+
+volumes:
+  crdb-data:

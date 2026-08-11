@@ -1,0 +1,13 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadAxiomDatabaseSecrets",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameters"],
+      "Resource": [
+        "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/axiom/prod/DATABASE_URL"
+      ]
+    }
+  ]
+}

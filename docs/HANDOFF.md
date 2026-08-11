@@ -1,6 +1,11 @@
 # AXIOM — Handoff
 
-**Written 2026-08-10. Deadline 2026-08-18 17:00 EDT. You have ~8 days.**
+**Written 2026-08-10. Last updated 2026-08-10 (build session 2). Deadline 2026-08-18 17:00 EDT.**
+
+> **Status in one line:** the engine is BUILT and PROVEN — 30/30 tasks completed through
+> 12 SIGKILLs with zero duplicate refunds — and the core CockroachDB claim is verified.
+> Jump to §5 for exactly what exists, §5.4 for what was proven, §5.5 for the two real bugs
+> that running it (rather than reading it) uncovered.
 
 You are picking up a hackathon project mid-build. This document is the complete brief:
 what the competition wants, what we are building and why, what is actually on disk right
@@ -18,24 +23,31 @@ discipline in anything you add.
 
 ## 0. First 30 minutes
 
-Do these in order before writing any application code.
-
 1. Read this file end to end.
 2. Read `db/001_schema.sql` end to end. Every non-obvious choice has a `WHY` comment.
    The comments are the design doc; do not change a line without reading its comment.
-3. **`git init` has run but there are zero commits. Commit everything immediately.**
-   The entire project currently exists only as untracked files on one laptop.
+3. Bring the environment up and prove it still works before changing anything:
+
    ```bash
-   cd ~/axiom && git add -A && git commit -m "AXIOM: schema, preflight, docs"
+   cd ~/axiom
+
+   # local CockroachDB (the Cloud cluster password is still unavailable — see §11)
+   mkdir -p .local-crdb && cd .local-crdb
+   nohup ../cockroach-v26.2.3.darwin-10.9-amd64/cockroach start-single-node \
+       --insecure --store=./data --listen-addr=localhost:26257 --http-addr=localhost:8081 \
+       > crdb.log 2>&1 &
+   cd ..
+
+   export DATABASE_URL='postgresql://root@localhost:26257/axiom?sslmode=disable'
+   export AXIOM_OFFLINE=1        # deterministic embeddings + rule triage, no AWS needed
+
+   ./.venv/bin/python scripts/chaos_demo.py --workers 3 --kill-every 1.8 --quiet
    ```
-   `.gitignore` now excludes `.env`, keys, the **339 MB** local cockroach binary, the
-   single-node runtime dumps (`heap_profiler/`, `pprof_dump/`, …) and `preflight.log`.
-   `preflight.log` is deliberately untracked because it contains the live cluster hostname
-   and SQL username and the repo is going public — it stays on disk as a local artifact, and
-   §5.2 below summarises everything it proves. **Run `git status` and confirm the staged set
-   is only source before you commit.**
-4. Run the preflight (§5.1). **Nothing in §6 is safe to build until it goes green.**
-5. Skim §7 (the build plan) and §8 (traps) so you know what you are aiming at.
+
+   That last command is the whole project in one line. It must end in `PASS:` with
+   `DUPLICATE REFUNDS 0`. If it does not, stop and fix that before anything else.
+4. `git log` — the work is committed now. Keep it that way; commit after every working step.
+5. Skim §7 (what is left) and §8 (traps).
 
 ---
 
@@ -143,95 +155,188 @@ it scores nothing on criterion #1 and little on #2. Build it only if it serves #
 
 ## 5. Where we left off — exact state of the repository
 
-**Repo:** `~/axiom` — local only, no remote, **zero commits**, everything untracked.
+**Repo:** `~/axiom`, committed (`856e4c2` + follow-ups). Still local-only — no GitHub
+remote yet (§11).
 
 ```
 ~/axiom
-├── LICENSE                  Apache-2.0                                    ✅ done
-├── README.md                thesis, architecture, "what it does not claim" ✅ good draft
-├── .gitignore               secrets, venvs, tfstate, .claude/             ✅ done
-├── db/001_schema.sql        747 lines, fully commented                    ⚠️ NEVER EXECUTED
-├── scripts/preflight.py     9 gates, rewritten in Python                  ❌ NEVER RUN
-├── preflight.log            output of an EARLIER shell/SQL probe          ⚠️ read §5.2
+├── axiom/                   THE ENGINE — built and working this session
+│   ├── config.py            settings; SYSTEM_TENANT, EMBED_DIMS=1024, SHARD_COUNT=16
+│   ├── db.py                pool, tx() with 40001 retry + full jitter, vector_literal()
+│   ├── models.py            enums mirroring the schema; CLAIMABLE_STATES is the single
+│   │                        source of truth for the claim predicate
+│   ├── embeddings.py        Bedrock Titan V2 (verified live) + deterministic offline mode
+│   ├── llm.py               Bedrock Claude triage + rule-based offline mode
+│   ├── events.py            append-only journal, gap-free per-subject seq
+│   ├── memory.py            write / recall / quarantine / effects_licensed_by
+│   ├── policy.py            procedural memory, versioned, one ACTIVE enforced by index
+│   ├── tasks.py             THE CORE: the five protocols + approvals + failures
+│   ├── provider.py          the external world (separate DB) + chaos injection
+│   ├── worker.py            the process you are meant to kill
+│   └── seed.py              demo tenant, policy, mission, 30 exceptions, 10 prior memories
+├── db/001_schema.sql        747 lines — APPLIED CLEAN, first try
+├── db/003_provider.sql      the provider ledger, in its own database
+├── scripts/preflight.py     17 gates — 16 blocking green, 1 advisory characterization
+├── scripts/chaos_demo.py    the headline demo — PASSES
 ├── docs/HANDOFF.md          this file
-└── cockroach-v26.2.3…/      local binary + heap_profiler/, pprof_dump/,
-                             goroutine_dump/ — throwaway artifacts of a
-                             local `cockroach start-single-node`. Ignore
-                             or delete; do not commit.
+├── .venv/                   psycopg[binary], psycopg_pool, boto3, fastapi, uvicorn, pytest
+└── .local-crdb/             local single-node cluster (gitignored)
 ```
 
-**There is no application code.** No API, no worker, no planner, no Bedrock call, no UI,
-no Dockerfile, no IaC, nothing deployed. Days 1–8 of the plan in §7 are all still ahead.
+Built in parallel by a follow-up agent fan-out and **verified adversarially** — see §5.6
+for the honest verdict on each: `tests/`, `axiom/api.py`, `axiom/audit_mcp.py`, `web/`
+(Mission Control), `Dockerfile` + `docker-compose.yml` + `deploy/`, and the rewritten
+`README.md` with `docs/ARCHITECTURE.md`, `docs/CRASH_WINDOWS.md`, `docs/SUBMISSION.md`.
 
-### 5.1 The cluster
+### 5.1 Two clusters, and which one you can reach
 
-✅ VERIFIED from `preflight.log`: a real CockroachDB Cloud cluster already exists.
+**Local (works right now, use this):** CockroachDB **v26.2.3**, insecure single node at
+`localhost:26257`, started from the vendored binary. The schema, the provider database,
+the whole engine and the chaos demo all run against it. Vector indexing is enabled and
+the ANN path is confirmed in use.
 
-- Host: `axiom-memory-31580.j77.aws-us-east-1.cockroachlabs.cloud:26257`
-- SQL user: `adam`
-- Version: **CockroachDB CCL v26.2.5** (cluster version 26.2), AWS `us-east-1`
-- `default_transaction_isolation` = **serializable** ✅
-- `feature.vector_index.enabled` settable to `true` on this tier ✅
-- `VECTOR(1024)` column type accepted ✅
-- `CREATE VECTOR INDEX … vector_cosine_ops` accepted; backfill job completed ✅
+**CockroachDB Cloud (exists, currently unreachable):**
+`axiom-memory-31580.j77.aws-us-east-1.cockroachlabs.cloud:26257`, user `adam`,
+**v26.2.5**, AWS `us-east-1`. ✅ VERIFIED serializable-by-default, vector indexing
+enabled, `VECTOR(1024)` accepted, `CREATE VECTOR INDEX … vector_cosine_ops` backfilled.
+**The password is not stored anywhere in this environment**, so nothing has been run
+against it since. Getting it (or minting a fresh SQL user with `ccloud`, which also
+exercises a required hackathon tool) is the top item in §11.
 
-**Password is not in the repo and not in the environment.** `DATABASE_URL` is unset and
-`psycopg` is not installed. Before anything else:
+⚠️ `001_schema.sql`'s header still says *"Target: v25.4+ … validated on v25.4.14"*. It has
+now actually been validated on **v26.2.3** locally and its DDL was accepted on **v26.2.5**
+in the Cloud. Update that header to say what was really run.
 
-```bash
-python3 -m venv ~/axiom/.venv && source ~/axiom/.venv/bin/activate
-pip install "psycopg[binary]"
-export DATABASE_URL='postgresql://adam:<PASSWORD>@axiom-memory-31580.j77.aws-us-east-1.cockroachlabs.cloud:26257/defaultdb?sslmode=verify-full'
-python3 scripts/preflight.py    # exit 0 required
+### 5.2 AWS is live
+
+✅ VERIFIED this session with real calls:
+
+- Credentials work — account `704229156617`, IAM user `solace-dev`, `us-east-1`.
+- **Bedrock Titan V2** (`amazon.titan-embed-text-v2:0`) returns a **1024-d** embedding,
+  matching the `VECTOR(1024)` the schema pins.
+- **Bedrock Claude** models are available in-region, including
+  `anthropic.claude-sonnet-4-5-20250929-v1:0` (the configured planner).
+
+So the "≥1 AWS service" requirement is satisfiable with real calls, not aspiration.
+Nothing has been *deployed* — no ECS, no ALB, no billable resources created.
+
+### 5.3 THE CORE CLAIM IS PROVEN
+
+The question §5.3 of the previous handoff called "the single most important open
+question" now has an answer, and it is the good one.
+
+```
+=== gate 6: THE CORE CLAIM — write + semantic recall in ONE transaction ===
+  [PASS] uncommitted memory is recallable in-transaction :: UNCOMMITTED: agent died at ACTION_PREPARED
+  [PASS] in-transaction recall still uses the index
 ```
 
-Ask the operator for the password, or mint a fresh SQL user from the Cloud console /
-`ccloud` — minting a new one via `ccloud` is better anyway, because it exercises a required
-tool and gets the command into the README.
+A memory written inside a transaction **is** returned by an ANN search in that same
+transaction, **and the plan still uses the vector index** rather than degrading to a
+scan. The fused recovery path in §6.5(e) is therefore real, and the README may say so.
 
-⚠️ Note the version drift: `001_schema.sql`'s header says *"Target: CockroachDB v25.4+ …
-validated on v25.4.14"* but the live cluster is **v26.2.5**. Update the header once the
-schema actually applies cleanly, and cite the version you really ran it on.
+Full preflight result — **16/16 blocking gates pass**, one advisory:
 
-### 5.2 What the old `preflight.log` actually proves — read this carefully
+| Gate | Result |
+| --- | --- |
+| serializable by default | ✅ |
+| `feature.vector_index.enabled` settable | ✅ |
+| `VECTOR(1024)` column | ✅ |
+| vector index backfill | ✅ 82s for 5,000 rows |
+| cosine `<=>` uses the index @ 5,000 rows | ✅ `vector search` + `prefix spans` |
+| L2 `<->` uses the index | ✅ |
+| **subquery search vector uses the index** | ⚠️ **NO — advisory** |
+| **bound-parameter search vector uses the index** | ✅ **YES — so app code is fine** |
+| ANN returns rows / no cross-tenant leakage | ✅ |
+| **uncommitted memory recallable in-transaction** | ✅ |
+| **in-transaction recall still uses the index** | ✅ |
+| rewind (`AS OF SYSTEM TIME`) | ✅ 4,501 rows recovered post-delete |
+| ANN query works `AS OF SYSTEM TIME` | ✅ (must be on the **top-level** statement) |
+| `gc.ttlseconds` readable | ✅ 14400 (4h) locally |
+| follower reads | ✅ |
+| `vector_search_beam_size` tunable | ✅ |
 
-The log is from an **earlier shell/SQL probe, not from `scripts/preflight.py`**. Steps 1–7
-passed. Then:
+Three findings worth carrying forward:
 
-- ❌ **STEP 8 — the vector index was NOT used.** The plan is
-  `scan … table: axiom_preflight@axiom_preflight_pkey, spans: FULL SCAN`, with
-  `missing stats`, plus an index recommendation for a plain covering index. Two confounds:
-  the search vector was passed as a **subquery** rather than a literal, and the table held
-  **~4 rows** with no statistics. Both are plausible causes and the log cannot separate
-  them.
-- ❌ **STEP 9 — "THE CORE CLAIM" did not pass.** It printed the same two rows as step 7;
-  the row inserted-but-uncommitted inside the transaction **never appeared in the results**.
-  Whether that is because it fell outside top-k or because in-transaction recall genuinely
-  misses uncommitted rows, the log does not say. **Treat it as unproven, not as passed.**
-- ❌ **STEP 10 — errored** `42P01 relation "axiom_preflight" does not exist`. Self-inflicted:
-  `AS OF SYSTEM TIME '-10s'` pointed at an instant before the table was created. Not a
-  cluster limitation.
+1. **A subquery search vector defeats the vector index; a bound parameter does not.** The
+   old log's `FULL SCAN` had two confounds (subquery + 4 rows); both are now isolated. The
+   rule is enforced in exactly one place, `db.vector_literal()`.
+2. **`AS OF SYSTEM TIME` must sit on the top-level statement.** Wrapping an AOST select in
+   `SELECT count(*) FROM (…)` fails. `db.tx(as_of=…)` sets it for the whole transaction.
+3. **`sin()` has no `DECIMAL` overload** in CockroachDB — `generate_series` yields INT and
+   `INT * DECIMAL` is DECIMAL, so vector fixtures need an explicit `::FLOAT8`.
 
-`scripts/preflight.py` was written to settle all three, and is a good piece of work — it
-escalates the fixture count (5,000 → 25,000 rows), isolates the literal-vs-subquery
-variable as its own gate, and captures a real `cluster_logical_timestamp()` instead of
-using a relative interval. It has **never been executed**.
+### 5.4 What the chaos demo actually proves
 
-### 5.3 The single most important open question
+`scripts/chaos_demo.py` seeds a mission, spawns workers, and **SIGKILL**s a random live
+one every 1.8 s — no signal handler, no `finally`, no polite lease release, exactly what
+an OOM kill or a spot reclamation looks like. Real measured run:
 
-> **Can a single SERIALIZABLE transaction write a memory and then run an
-> index-accelerated ANN recall that sees it?**
+```
+  wall clock                23.3s
+  workers SIGKILLed         12
+  worker restarts           16
+  approvals answered         3   (policy sent them to a human)
+  tasks terminal          30/30   {'SUCCEEDED': 27, 'DEAD_LETTER': 3}
+  ----------------------------------------------------------------
+  refunds created           18
+  dollars moved         $2,042.04
+  idempotent replays         2   (re-sends the provider absorbed)
+  provider verdicts     {'created': 18, 'replayed': 2}
+  DUPLICATE REFUNDS          0
 
-This is the load-bearing claim of the entire project. If in-transaction ANN recall silently
-falls back to a full scan, the fused recovery path still works *correctly* — but the
-performance story dies, and with it a chunk of criterion #2. If uncommitted rows are not
-visible to the vector index at all, the design needs restructuring (fallback in §9.5).
+PASS: 12 kills, 2 re-sends absorbed by the provider, 0 duplicate refunds.
+```
 
-**Gate 6 of `preflight.py` answers this. Run it first. Report the answer honestly in the
-README either way** — a documented, measured limitation reads as engineering maturity;
-a claim the judges can disprove reads as fabrication.
+An earlier, harsher run: **87 SIGKILLs, 95 restarts, 5 replays, 0 duplicates.**
 
----
+Two things make this evidence rather than theatre:
+
+- **The provider is a genuinely separate database** (`db/003_provider.sql`), reached over
+  its own connection with autocommit, which AXIOM *cannot* enlist in its transactions.
+  That is the real relationship an application has with a payments API, minus the network.
+  A fake provider inside our transaction would make the demo pass and prove nothing.
+- **The script fails on zero replays.** A run where no crash landed in the dangerous
+  window proved nothing, so `INCONCLUSIVE` is a distinct, loud outcome from `PASS`.
+
+### 5.5 Two real bugs, found by running it
+
+Both were invisible on the page and obvious the moment the thing ran. Keep the scar
+tissue in the comments; they are the best argument in the codebase for the test suite.
+
+**Bug 1 — an exception rolled back the transaction that recorded the decision.**
+`prepare()` signalled "this needs a human" by raising `NeedsApproval`. The exception
+propagated out of `db.tx()`, so the connection context manager **rolled back** — throwing
+away the `axiom_approval` row and the `AWAITING_APPROVAL` transition the same transaction
+had just written. The task snapped back to `READY`, got re-claimed, parked again, and
+looped forever while `axiom_approval` stayed **empty**. Symptom: three tasks stuck at
+`lease_epoch 9` with zero approvals in the table. Fix: `prepare()` now returns a
+`PrepareResult(receipt | approval_id)`. *An exception is a fine way to abort a transaction
+and a terrible way to return a value from one.*
+
+**Bug 2 — the approval was granted and then ignored.** `consume_approval()` existed and
+nothing called it. An approved task was re-claimed, re-evaluated against the **unchanged**
+policy ceiling, and parked again — the policy had not moved and never would; the approval
+was the thing that changed. The demo answered 1,187 approvals for 3 tasks before this was
+caught. Fix: `prepare()` now burns the single-use decision token *before* the authority
+check, so a human decision authorizes exactly one action and cannot be replayed into a
+second refund by a restarting worker.
+
+Note what both have in common: they are failures of the **approval** path, the one path
+the happy-path demo never touched. That is exactly the class of bug the W1–W7 suite exists
+to catch.
+
+### 5.6 Verified status of the parallel workstreams
+
+⚠️ Each of these was built by a subagent and then re-run by a separate adversarial
+verifier, because a build report is not evidence. Treat any row below marked PARTIAL as
+work in progress, and read that workstream's own notes before trusting it.
+
+*(This table is filled in at the end of the session — see the run summary appended in
+§12. If §12 is missing, the fan-out did not complete and you should verify each of
+`tests/`, `axiom/api.py`, `web/`, `deploy/`, and `README.md` yourself before relying on
+them.)*
+
 
 ## 6. The system
 
@@ -471,69 +576,39 @@ Same discipline for benchmarks: measured numbers with the measurement method, or
 
 # PART III — EXECUTION
 
-## 7. Build plan — 8 days
+## 7. What is left — 7 days
 
-Ordered by *risk retired per hour*, not by what is fun. Dates are aggressive because the
-submission must be finished a day early; the demo URL must then survive a month.
+Day 1 of the original plan is **done**: preflight green, schema applied, engine built,
+chaos demo passing, everything committed. Re-ordered by risk retired per hour from here.
 
-**Day 1 (Aug 10-11) — de-risk, then commit**
-- `git commit`, create the public GitHub repo, push. Public from the start: it is the proof
-  of the "newly created" rule.
-- Install deps, get `DATABASE_URL`, **run `preflight.py` until it exits 0**. Fix or document
-  every failing gate. Record the answer to §5.3 in the README.
-- Apply `db/001_schema.sql` to a fresh `axiom` database. It has never run — expect syntax
-  fixes on `fnv32` / `crdb_internal.datums_to_bytes`, the inline `VECTOR INDEX` clauses
-  inside `CREATE TABLE`, and the `SET CLUSTER SETTING` line needing admin. `SHOW CREATE
-  TABLE axiom_task` afterwards and confirm no column families appeared.
-- Write `db/002_seed.sql`: system tenant, one demo tenant, one `refund_authority` policy
-  (ACTIVE, `max_auto_action_cents` = e.g. $200), 30 order exceptions.
+**Now (highest value, do first)**
+1. **Get the Cloud cluster back.** Everything so far runs on a local single node. The
+   submission needs the Cloud cluster (it is the "distributed" in distributed vector
+   indexing, and `ccloud` is a required tool). Mint a fresh SQL user via `ccloud`, apply
+   `001_schema.sql` + `003_provider.sql`, and re-run **preflight** and the **chaos demo**
+   against Cloud. Expect differences: real network latency, real contention, `40001` rates
+   that a single node never produces. Quote Cloud numbers in the README, not laptop numbers.
+2. **Push to a public GitHub repo.** The "newly created during the submission period" rule
+   is proven by the history, and the history is currently on one laptop.
+3. **Re-run the invariant suite against Cloud**, not just locally.
 
-**Day 2 — the core loop, no LLM yet**
-- Python worker: register agent → heartbeat → CLAIM → PREPARE → DISPATCH → SETTLE against a
-  **fake provider** with injectable latency and failures. Hard-code the "decision"; no
-  Bedrock in the loop yet.
-- Retry wrapper for `40001` on every transaction. This is not optional under SERIALIZABLE.
-- Prove W1–W6 by killing the process with `SIGKILL` at each point. **If it does not survive
-  a kill on day 2, nothing later matters.**
+**Then (scores directly)**
+4. Deploy to ECS Fargate + ALB, get the demo URL live and *stable*, and put an uptime
+   monitor on it that alerts. It must answer on Sep 15.
+5. Managed MCP Server + read-only service account → the Audit Agent, running for real
+   against the Cloud cluster rather than in local-fallback mode.
+6. Record the video (§10). Under 3 minutes. Deployed system on screen, not localhost.
+7. Devpost writeup from `docs/SUBMISSION.md`.
 
-**Day 3 — memory, for real**
-- Bedrock: Titan V2 embeddings (1024-d, normalized → cosine) + planner/decider calls.
-- Write outcome memories inside the settle transaction. Implement the recovery ANN recall
-  with the four pinned prefix columns.
-- **`EXPLAIN` the recovery query and confirm the plan contains a `vector search` node with
-  `prefix spans`, not a `scan`.** Paste that plan into the README.
+**If time remains, in this order:** the counterexample panel (§9.3) → contribute a skill
+upstream (§9.6) → `AS OF SYSTEM TIME` rewind as a product feature (§9.4) → multi-region
+(§9.7, first to be cut).
 
-**Day 4 — API + Mission Control**
-- FastAPI: create mission, list tasks, task detail w/ event timeline, approvals inbox,
-  kill-worker endpoint (demo control), memory browser.
-- UI: live task grid, per-task state, the crash-window table as a live panel, big red
-  **KILL WORKER** button. Design bar per house style — no default AI-staple fonts, no glow,
-  no emoji. Deliberate type choice.
+**Submit Aug 17, not Aug 18.**
 
-**Day 5 — AWS deploy**
-- Dockerize; push to ECR; ECS Fargate service for workers + one for the API; ALB; S3 for
-  static assets. **Do this on Day 5, not Day 7** — deployment always takes longer than the
-  estimate, and the URL must be live and stable well before the deadline.
-- Cost check for a month of uptime (§8.6).
+**Never cut:** the fused transaction, the kill-a-worker demo, the crash-window table, the
+invariant suite, the video.
 
-**Day 6 — the extras that score**
-- Managed MCP Server + read-only service account → Audit Agent.
-- Invariant test suite (§9.1) in CI.
-- Human approval flow end-to-end, including the single-use `decision_token`.
-- Memory quarantine demo: poison a memory, quarantine it, watch it vanish from retrieval
-  atomically, then enumerate every effect it licensed via `axiom_attempt_by_license`.
-
-**Day 7 — the submission is the product**
-- README rewrite: architecture diagram, crash-window table, setup instructions a judge can
-  actually follow, explicit CockroachDB-and-AWS tool list, honest limitations section.
-- Record and cut the video (§10). **Under 3 minutes, hard limit.**
-- Devpost writeup.
-
-**Day 8 (Aug 17) — submit a day early.** Aug 18 is for disasters only.
-
-**Cut lines, in the order you cut them:** multi-region → compensating-saga tasks →
-memory-poisoning demo → MCP Audit Agent → Mission Control polish. **Never cut:** the fused
-transaction, the kill-the-worker demo, the crash-window table, the video.
 
 ## 8. Traps that will silently kill this
 
@@ -563,6 +638,20 @@ transaction, the kill-the-worker demo, the crash-window table, the video.
    suspects localhost discounts the whole entry.
 10. **Bedrock model access is not automatic.** Request access to the Titan embeddings and
     the planner model in the target region *early* — enablement can take hours.
+    (✅ Already confirmed working in `us-east-1` on account `704229156617`.)
+
+Learned the hard way this session — all four cost real time:
+
+11. **Never signal a decision out of `db.tx()` with an exception.** The rollback takes the
+    row that recorded the decision with it. Return a result object. See §5.5 bug 1.
+12. **A granted permission that nothing consumes is not a permission.** If a check fails,
+    something must *change* before the next attempt, or the task loops forever against an
+    unchanged rule. See §5.5 bug 2.
+13. **`SET LOCAL x = %s` fails with a bound parameter** — the value arrives as a string and
+    CockroachDB rejects it ("requires an integer value"). Interpolate a validated `int()`.
+14. **A demo that never exercises the human-in-the-loop path is not a passing demo.** Both
+    real bugs lived exclusively in the approval branch, which the happy path never touched.
+    Whatever branch your demo skips is where your bugs are.
 
 ## 9. How to make it better than currently specified
 
@@ -642,12 +731,23 @@ points. Style rules: no glow, no floating dots, no emoji, crisp glass, fast well
    confirming their own status, entering with an eligible team member as the registered
    entrant, or building it anyway as a portfolio and open-source artifact (the engineering
    stands on its own regardless). Do not quietly assume either way, and do not moralize.
-2. **The `adam` SQL user / cluster password.** Needed before anything runs. Prefer minting a
-   fresh user via `ccloud` so the command lands in the README.
-3. **AWS account, region, and budget** for a month of judging uptime; Bedrock model access
-   in that region.
-4. **GitHub repo** — public, under which account.
+2. **The Cloud cluster password — the top blocker.** Everything currently runs on a local
+   single node. `axiom-memory-31580.j77.aws-us-east-1.cockroachlabs.cloud` exists and was
+   verified in an earlier session as user `adam`, but the password is stored nowhere here.
+   Prefer minting a fresh SQL user with `ccloud` so the command lands in the README and a
+   required tool gets exercised. Until this is resolved, no number in the submission can
+   honestly be labelled "CockroachDB Cloud".
+3. **AWS budget approval for a month of uptime.** Credentials work (account
+   `704229156617`, IAM user `solace-dev`) and Bedrock is enabled, but **nothing has been
+   deployed and no billable resource has been created** — that is deliberately the
+   operator's call. See `deploy/COST.md` for the real line items. Note the account name
+   suggests it is shared with another project; confirm before adding cost to it.
+4. **GitHub repo** — public, under which account. The repo is committed locally with no
+   remote. The public history is what proves the "newly created" rule.
 5. **Team or solo** on the Devpost submission.
+6. **Whether to keep the demo's LLM path on Bedrock Claude or run the whole demo offline.**
+   Offline is deterministic, free, and hermetic; Bedrock is what the hackathon rewards.
+   Current default is Bedrock for the demo, offline for tests. Confirm that is what you want.
 
 ---
 
@@ -655,23 +755,31 @@ points. Style rules: no glow, no floating dots, no emoji, crisp glass, fast well
 
 Nothing ships until every line is checked.
 
+`[x]` = done and personally verified on the LOCAL cluster this session.
+`[c]` = done locally, **still to be re-verified against CockroachDB Cloud.**
+
 ```
-[ ] preflight.py exits 0; §5.3 answered and written into the README
-[ ] 001_schema.sql applies clean to a fresh database
-[ ] SHOW CREATE TABLE axiom_task shows NO column families
-[ ] EXPLAIN of the recovery query shows `vector search` + `prefix spans` (not `scan`)
+[x] preflight.py exits 0; the core claim is answered YES (§5.3)
+[x] 001_schema.sql applies clean to a fresh database
+[x] SHOW CREATE TABLE axiom_task shows NO column families
+[x] EXPLAIN shows `vector search` + `prefix spans` (not `scan`) at 5,000 rows
+[x] SIGKILL a worker mid-refund → exactly one provider effect, verified in the ledger
+[x] 30/30 tasks terminal through 12 SIGKILLs, 0 duplicate refunds
+[x] LICENSE present; git history exists inside the submission window
 [ ] W1–W7 each have a test that tries to break the invariant and fails
-[ ] SIGKILL a worker mid-refund → exactly one provider effect, verified in the ledger
 [ ] Two workers racing one step → loser gets 23505, no second call
 [ ] Stale-epoch settle is rejected
 [ ] Budget cap cannot be exceeded by concurrent PREPAREs
 [ ] Quarantining a memory removes it from retrieval in the same transaction
 [ ] Cross-tenant read returns zero rows; in-tenant read returns rows
+[ ] Approval token is single-use; approved task proceeds exactly once
+[c] preflight + chaos demo re-run against CockroachDB CLOUD, numbers quoted from Cloud
+[ ] repo pushed public to GitHub
 [ ] Demo URL live on AWS, reachable from a machine that is not the dev laptop
 [ ] Uptime monitor on the demo URL, alerting the operator, through Sep 15
+[ ] Audit Agent running over the real Managed MCP Server, not the local fallback
 [ ] README: setup a stranger can follow, arch diagram, crash-window table, limitations
 [ ] README states "effectively-once", never "exactly-once"
-[ ] LICENSE present; repo public; history shows creation inside the submission window
 [ ] Video < 3:00, uploaded, unlisted-or-public, link tested in a logged-out browser
 [ ] Devpost: CockroachDB tools (all 4) and AWS services listed explicitly
 [ ] Submitted by Aug 17, not Aug 18

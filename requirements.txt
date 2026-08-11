@@ -1,0 +1,34 @@
+# AXIOM runtime dependencies.
+#
+# Pinned to the exact versions this project was built and tested against
+# (./.venv, Python 3.14.5, macOS arm64 — `pip freeze` on 2026-08-10). Only DIRECT
+# dependencies are listed; everything else in `pip freeze` arrives transitively and
+# pinning it here would be noise that rots. If you need a byte-identical lock,
+# generate one with `pip freeze > requirements.lock.txt` — this file is the
+# human-maintained intent.
+#
+#   pip install -r requirements.txt
+
+# --- database -----------------------------------------------------------------
+# psycopg 3 with the prebuilt libpq wheel: no libpq-dev, no gcc, no apt layer in
+# the image. `psycopg[binary]` is what makes the Dockerfile a pure-wheel build.
+psycopg[binary]==3.3.4
+# The pool is separate from the driver by design upstream; axiom/db.py needs it.
+psycopg-pool==3.3.1
+
+# --- AWS ----------------------------------------------------------------------
+# Bedrock Runtime only (titan-embed-text-v2 embeddings + Claude for triage).
+# botocore/jmespath/s3transfer/urllib3 come along; do not pin them here.
+boto3==1.43.68
+
+# --- API ----------------------------------------------------------------------
+fastapi==0.141.1
+# [standard] pulls uvloop + httptools + watchfiles + websockets. uvloop is the
+# reason it is worth the extra megabytes: the API is entirely I/O-bound on the
+# CockroachDB pool.
+uvicorn[standard]==0.52.1
+
+# --- not required to RUN axiom ------------------------------------------------
+# The test suite needs pytest==9.1.1. It is deliberately absent from this file so
+# the container image does not ship a test runner:
+#     pip install pytest==9.1.1

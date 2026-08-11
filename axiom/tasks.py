@@ -688,11 +688,24 @@ def fail_retryable(cur: psycopg.Cursor, *, task: Claimed, agent_id: uuid.UUID,
                    receipt: Receipt | None, error: str, backoff_seconds: int) -> None:
     """Release the task for a later retry, with backoff written into available_at.
 
-    Bumping `attempt` here is what eventually drives the task out of the claim index
-    entirely (attempt < max_attempts is part of the claim predicate), so a permanently
-    failing task stops being scanned rather than being retried forever.
+    Bumping `attempt` drives the task out of the claim index once the budget is spent
+    (attempt < max_attempts is part of the claim predicate), so a permanently failing
+    task stops being scanned rather than being retried forever.
+
+    EXHAUSTION IS TERMINAL, and it has to be stated explicitly.
+    ---------------------------------------------------------
+    Leaving the row in READY at attempt == max_attempts was a real defect (found by
+    tests/test_invariants.py, 2026-08-10). The task leaves the partial index — which the
+    schema comment describes as intended — but nothing then transitions it, so it sits in
+    READY forever: never retried, never terminal, never surfaced to an operator, with its
+    receipt parked on the unsettled_receipts worklist awaiting a reconciliation that will
+    never be attempted. A mission containing one reads as 29/30 complete indefinitely.
+    "Falls out of the index" is a performance property; it was never a state transition,
+    and treating it as one is how a queue quietly loses work.
     """
     _assert_fence(cur, task.id, agent_id, task.lease_epoch)
+
+    exhausted = task.attempt + 1 >= task.max_attempts
 
     if receipt:
         cur.execute("""
@@ -701,21 +714,25 @@ def fail_retryable(cur: psycopg.Cursor, *, task: Claimed, agent_id: uuid.UUID,
             WHERE id = %s AND attempt_state IN ('PREPARED', 'DISPATCHED')
         """, (str(receipt.id),))
 
+    next_state = TaskState.DEAD_LETTER if exhausted else TaskState.READY
     cur.execute("""
         UPDATE axiom_task
-        SET state = 'READY', attempt = attempt + 1, lease_owner = NULL,
+        SET state = %s, attempt = attempt + 1, lease_owner = NULL,
             available_at = now() + %s::INTERVAL, last_error = %s, updated_at = now()
         WHERE id = %s AND lease_epoch = %s
-    """, (f'{backoff_seconds} seconds', error[:500], str(task.id), task.lease_epoch))
+    """, (str(next_state), f'{backoff_seconds} seconds', error[:500],
+          str(task.id), task.lease_epoch))
     if cur.rowcount != 1:
         raise LeaseLost(f'fence moved while failing task {task.id}')
 
-    events.append(cur, tenant_id=task.tenant_id, subject_type='task', subject_id=task.id,
-                  event_type='task.retry_scheduled', actor=f'agent:{agent_id}',
-                  from_state=str(task.state), to_state=str(TaskState.READY),
-                  lease_epoch=task.lease_epoch, mission_id=task.mission_id, task_id=task.id,
-                  detail={'error': error[:500], 'backoff_seconds': backoff_seconds,
-                          'attempt': task.attempt + 1})
+    events.append(
+        cur, tenant_id=task.tenant_id, subject_type='task', subject_id=task.id,
+        event_type='task.dead_lettered' if exhausted else 'task.retry_scheduled',
+        actor=f'agent:{agent_id}', from_state=str(task.state), to_state=str(next_state),
+        lease_epoch=task.lease_epoch, mission_id=task.mission_id, task_id=task.id,
+        detail={'error': error[:500], 'backoff_seconds': backoff_seconds,
+                'attempt': task.attempt + 1, 'max_attempts': task.max_attempts,
+                'reason': 'retry budget exhausted' if exhausted else None})
 
 
 def dead_letter(cur: psycopg.Cursor, *, task: Claimed, agent_id: uuid.UUID,
@@ -767,7 +784,53 @@ def request_approval(cur: psycopg.Cursor, *, task: Claimed, agent_id: uuid.UUID,
     The expiry is written into the task's available_at, so an unanswered approval is
     reclaimed by a worker and resolved rather than sitting forever — no approval-expiry
     cron job, the same self-healing trick the lease uses.
+
+    Making that sentence TRUE requires the two steps below, which were missing until the
+    invariant suite caught it. The schema promised a self-healing park; the code only
+    delivered the first half of it, and the second re-park died on 23505 against
+    axiom_approval_one_pending because the lapsed question was still sitting there PENDING.
     """
+    # 1. RETIRE THE LAPSED QUESTION. Nobody answered inside the TTL, so it is no longer
+    #    an open question — it is a fact about a decision that did not happen, and it
+    #    stays in the table as one. This is the "no approval-expiry cron" claim being
+    #    honoured: expiry is settled lazily, by the next worker that needs the slot.
+    cur.execute("""
+        UPDATE axiom_approval
+        SET state = 'EXPIRED'
+        WHERE tenant_id = %s AND task_id = %s AND step_name = %s
+          AND state = 'PENDING' AND expires_at <= now()
+        RETURNING id
+    """, (str(task.tenant_id), str(task.id), step_name))
+    expired = cur.fetchall()
+    for e in expired:
+        events.append(cur, tenant_id=task.tenant_id, subject_type='task',
+                      subject_id=task.id, event_type='approval.expired',
+                      actor=f'agent:{agent_id}', mission_id=task.mission_id,
+                      task_id=task.id, lease_epoch=task.lease_epoch,
+                      detail={'approval_id': str(e['id']), 'ttl_seconds': ttl_seconds})
+
+    # 2. THE PARK IS IDEMPOTENT. If a question is still genuinely open — not yet expired —
+    #    do not ask it twice. Two agents raising the same approval could otherwise get two
+    #    different humans to answer it differently, which is exactly what the unique
+    #    partial index exists to prevent; returning the incumbent turns that 23505 into
+    #    the intended no-op.
+    cur.execute("""
+        SELECT id, expires_at FROM axiom_approval
+        WHERE tenant_id = %s AND task_id = %s AND step_name = %s AND state = 'PENDING'
+    """, (str(task.tenant_id), str(task.id), step_name))
+    live = cur.fetchone()
+    if live:
+        cur.execute("""
+            UPDATE axiom_task
+            SET state = 'AWAITING_APPROVAL', lease_owner = NULL, available_at = %s,
+                updated_at = now()
+            WHERE id = %s AND lease_epoch = %s
+        """, (live['expires_at'], str(task.id), task.lease_epoch))
+        if cur.rowcount != 1:
+            raise LeaseLost(f'fence moved while re-parking task {task.id}')
+        task.state = TaskState.AWAITING_APPROVAL
+        return live['id']
+
     cur.execute("""
         INSERT INTO axiom_approval (
             tenant_id, task_id, mission_id, step_name, reason, proposed_action,
@@ -781,10 +844,15 @@ def request_approval(cur: psycopg.Cursor, *, task: Claimed, agent_id: uuid.UUID,
           str(agent_id), f'{ttl_seconds} seconds'))
     row = cur.fetchone()
 
-    cur.execute("""
+    # A RE-escalation (one whose predecessor lapsed) bumps `attempt`. That bounds the
+    # loop: `attempt < max_attempts` is part of the claim predicate, so a question no
+    # human ever answers eventually stops being re-claimed and rests visibly in
+    # AWAITING_APPROVAL instead of burning a worker cycle every TTL forever. A FIRST
+    # escalation does not bump — being sent to a human is not a failed attempt.
+    cur.execute(f"""
         UPDATE axiom_task
         SET state = 'AWAITING_APPROVAL', lease_owner = NULL, available_at = %s,
-            updated_at = now()
+            attempt = attempt + {1 if expired else 0}, updated_at = now()
         WHERE id = %s AND lease_epoch = %s
     """, (row['expires_at'], str(task.id), task.lease_epoch))
     if cur.rowcount != 1:

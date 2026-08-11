@@ -1,0 +1,58 @@
+# Everything that must not enter the build context.
+#
+# The two entries that actually matter are the local CockroachDB binary (339 MB)
+# and .venv — without them the context is ~200 KB and `docker build` is instant,
+# with them every no-op rebuild ships a third of a gigabyte to the daemon.
+
+# --- huge, and rebuilt locally ------------------------------------------------
+cockroach-v*/
+.local-crdb/
+cockroach-data/
+.venv/
+venv/
+
+# --- runtime droppings from a local cockroach node ----------------------------
+heap_profiler/
+pprof_dump/
+goroutine_dump/
+inflight_trace_dump/
+executiontrace_dump/
+*.log
+
+# --- version control / editor / OS --------------------------------------------
+.git/
+.gitignore
+.github/
+.claude/
+.DS_Store
+**/.DS_Store
+
+# --- python -------------------------------------------------------------------
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# --- secrets: never, under any circumstance, in a layer -----------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- infrastructure: not needed by the app at runtime -------------------------
+deploy/
+.terraform/
+*.tfstate
+*.tfstate.*
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# --- docs ---------------------------------------------------------------------
+# LICENSE stays: Apache-2.0 §4(a) says redistribution must carry it, and an image
+# pushed to a public registry is redistribution.
+docs/
