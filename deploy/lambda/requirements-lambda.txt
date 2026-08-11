@@ -1,0 +1,34 @@
+# AXIOM :: what actually goes in the Lambda ZIP.
+#
+# A deliberately SMALLER list than requirements.txt, for two reasons that both cost real
+# money or real milliseconds:
+#
+#   * boto3/botocore are provided by the Lambda Python runtime. Shipping them would add
+#     ~50 MB unzipped for bytes that are already on the machine — and this ZIP has to
+#     stay under the 50 MB direct-upload limit so we never need an S3 bucket (S3's free
+#     tier is a 12-month offer, not an always-free one).
+#   * uvicorn is an HTTP server. Lambda IS the HTTP server here; Mangum speaks ASGI
+#     directly. uvicorn[standard] would drag in uvloop, httptools, websockets and
+#     watchfiles — every one of them a compiled or useless dependency for this shape.
+#
+# Versions match requirements.txt exactly where a linux-aarch64 wheel exists for the
+# target interpreter, because the point of a pinned file is that the thing you deployed
+# is the thing you tested. Anything not listed here arrives transitively (starlette,
+# pydantic-core, anyio, idna, sniffio, typing-extensions) and is pinned by the resolver
+# at build time, not by hand.
+
+# The ASGI -> Lambda adapter. The whole reason this deployment is not a rewrite.
+mangum==0.21.0
+
+# --- database ---------------------------------------------------------------------
+# psycopg-binary carries a prebuilt libpq: the Lambda Python runtime has no libpq and no
+# way to install one, so the pure-python path would fail at import on the first request.
+# Its 3.3.x wheels are tagged manylinux_2_28, not manylinux2014 — which is why build.sh
+# passes both platform tags. AL2023 (the python3.13 runtime) is glibc 2.34, so 2_28 is
+# satisfied; a python3.11 runtime would be Amazon Linux 2 (glibc 2.26) and would NOT be.
+psycopg==3.3.4
+psycopg-binary==3.3.4
+psycopg-pool==3.3.1
+
+# --- API --------------------------------------------------------------------------
+fastapi==0.141.1

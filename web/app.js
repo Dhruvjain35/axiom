@@ -14,6 +14,15 @@
  *    increment is the proof the old worker can no longer settle. It gets a flash, a
  *    persistent corner mark, and a counter — because it is the single most important
  *    invisible thing this system does.
+ *
+ * 3. POLLING IS METERED. The hosted demo runs on Lambda inside the always-free 1,000,000
+ *    requests/month, and this page is the only client. A fixed 1s poll issuing five GETs
+ *    per tick is ~15,000,000 requests a month from ONE tab left open — fifteen times the
+ *    entire free allowance, from a browser nobody is looking at. So the poll here is a
+ *    ladder (1s → 60s) that backs off when nothing changes, pins itself to 1s while work
+ *    is actually in flight, and stops dead — no timer at all — while the tab is hidden.
+ *    The current interval and the session's request count are printed in the header,
+ *    because a cost control you cannot see is a cost control you will not trust.
  */
 'use strict';
 
@@ -67,6 +76,9 @@ const SHARD_COUNT = 16;
 let apiFailures = 0;
 
 async function api(path, opts) {
+  // Every request this tab makes is counted here and nowhere else, so the number in the
+  // header is the real one — including the ones a panel swallows via get().
+  P.reqs++;
   const res = await fetch(path, Object.assign({ headers: { 'accept': 'application/json' } }, opts || {}));
   if (!res.ok) {
     let detail = res.status + ' ' + res.statusText;
@@ -108,7 +120,11 @@ const S = {
   epochs: new Map(),        // task_id -> last observed lease_epoch
   states: new Map(),        // task_id -> last observed state
   fenced: new Set(),        // task_ids that have been fenced since page load
+  fenceFrom: new Map(),     // task_id -> {from, to, at} for the recent-fence callout
   fenceCount: 0,
+  changed: false,           // did this poll cycle observe anything at all? drives backoff
+  chaosAt: 0,               // when KILL A WORKER was last fired; arms the recovery banner
+  missionSig: '',
   seenEvents: new Set(),    // "subject_id:seq"
   agents: [],
   agentsFetchedAt: 0,
@@ -118,6 +134,56 @@ const S = {
   drawerTask: null,
   crashWindows: null,
   booted: false,
+};
+
+// ────────────────────────────────────────────────────────────────── poll meter ──
+
+/** The rungs. 1s is the demo cadence — a state change has to appear inside one beat of
+ *  the operator's attention. 60s is what an abandoned tab settles to: 8 requests a minute
+ *  is 345,000 a month, which fits inside Lambda's free 1,000,000 with room for a second
+ *  viewer. Nothing in between is arbitrary either: 5s is "a human is reading", 15s and
+ *  30s are "the page is open on a spare monitor". */
+const LADDER = [1000, 2000, 5000, 15000, 30000, 60000];
+
+/** Cycles of stillness before stepping out one rung. Three, not one: a task can sit in
+ *  LEASED for two seconds mid-provider-call and that is not idleness. */
+const IDLE_BEFORE_BACKOFF = 3;
+
+/** The same thing, but for a board that still has a lease outstanding. A held lease is
+ *  weak evidence that something is about to happen, so it buys patience rather than
+ *  immunity: 25 cycles at 1s outlasts the 20s lease TTL, which means a takeover after a
+ *  worker dies is still caught on the fast rung — and a board left LEASED forever by a
+ *  crashed worker nobody came back for still backs off instead of polling until the
+ *  free tier runs out. Nothing on this page is allowed to pin the poll open. */
+const IDLE_BEFORE_BACKOFF_LIVE = 25;
+
+/** The slow set (health, workers, provider stats, receipts, approvals) never runs faster
+ *  than this no matter how fast the core loop is. It is 5 of the 8 requests per cycle. */
+const AUX_MIN_MS = 4000;
+
+/** States that mean a worker is holding this task RIGHT NOW, so the next second is worth
+ *  paying for. Only the two lease-holding states qualify.
+ *
+ *  READY and PENDING are deliberately absent, and that omission is the single largest
+ *  cost decision in this file. A freshly seeded board is 30 READY tasks that will not
+ *  move until a human presses RUN MISSION — it is the demo's RESTING state, not its
+ *  live one — and counting READY as live pinned the poll at 1s through it forever:
+ *  255 requests/minute, 11,000,000 a month, eleven times the entire free tier, from a
+ *  tab sitting on an idle board. Measured, not theorised. When a task does leave READY
+ *  the renderers set S.changed and the ladder snaps back to 1s within one cycle.
+ *
+ *  AWAITING_APPROVAL is absent for the same reason: it can sit for an hour waiting on a
+ *  human, and the human's click resets the ladder anyway. */
+const LIVE_STATES = new Set(['LEASED', 'ACTION_PREPARED']);
+
+const P = {
+  rung: 0,
+  idle: 0,
+  timer: null,
+  lastAux: 0,
+  lastTick: 0,
+  reqs: 0,
+  busy: false,
 };
 
 // ─────────────────────────────────────────────────────────────────────── toast ──
@@ -147,6 +213,11 @@ function renderHealth(h) {
 }
 
 function renderMission(m) {
+  // The backoff decision is made from what the DATA says, not from what the DOM did, so
+  // every renderer that can observe a change reports it here.
+  const sig = m ? [m.state, m.spent_cents, JSON.stringify(m.by_state || {})].join('|') : '';
+  if (sig !== S.missionSig) { S.missionSig = sig; S.changed = true; }
+
   S.mission = m && m.id ? m : null;
   if (!S.mission) {
     $('#m-title').textContent = 'no mission';
@@ -179,6 +250,9 @@ function renderMission(m) {
 }
 
 function renderProviderStats(p) {
+  if (p && S.pstats && (p.refunds !== S.pstats.refunds || p.replays !== S.pstats.replays)) {
+    S.changed = true;   // the provider acted: never let the poll be backing off through that
+  }
   S.pstats = p;
   if (!p) return;
   const dupes = Number(p.duplicate_orders || 0);
@@ -194,18 +268,67 @@ function renderProviderStats(p) {
 /** `fenced` marks a task that has been taken over at least once since this tab loaded.
  *  The corner tick and the highlighted epoch persist after the flash decays, so an
  *  operator who arrives mid-incident can still see which tasks changed hands. */
+const FENCE_CALLOUT_MS = 20000;
+
 function cellHTML(t, fenced) {
   const key = String(t.dedupe_key || '').replace(/^order:/, '').replace(/:refund$/, '');
+
+  // For the first 20 seconds after a takeover the epoch chip shows the TRANSITION —
+  // "e1 → e2" — not just the new value. On a 720p screen recording a single digit
+  // changing from 1 to 2 in a 9px chip is invisible; an arrow appearing is not. After
+  // the callout expires it collapses back to the plain chip and the corner mark stays.
+  const f = S.fenceFrom.get(t.id);
+  const recent = f && (Date.now() - f.at) < FENCE_CALLOUT_MS && Number(f.to) === Number(t.lease_epoch);
+  const epoch = recent
+    ? `<span class="ep bumped is-callout">e${esc(f.from)}<b>&rarr;</b>e${esc(f.to)}</span>`
+    : `<span class="ep${fenced ? ' bumped' : ''}">e${esc(t.lease_epoch)}</span>`;
+
   return (
     `<div class="cell-key">${esc(key)}</div>` +
     `<div class="cell-state">${esc(t.state)}</div>` +
     `<div class="cell-meta">` +
       `<span class="sh">s${String(t.shard).padStart(2, '0')}</span>` +
       `<span class="at${Number(t.attempt) > 1 ? ' retry' : ''}">a${esc(t.attempt)}</span>` +
-      `<span class="ep${fenced ? ' bumped' : ''}">e${esc(t.lease_epoch)}</span>` +
+      epoch +
     `</div>` +
     (fenced ? '<i class="fencemark"></i>' : '')
   );
+}
+
+/** How long the ARMED banner is allowed to keep promising a crash before it admits none
+ *  arrived. A takeover needs the chaos worker to die, the 20s lease to lapse, and another
+ *  worker to claim — so this has to be comfortably longer than one lease TTL, and 90s is.
+ *  Measured against the real failure it exists for: pressing KILL A WORKER on a board that
+ *  has already drained dispatches a worker with nothing to claim, so it exits cleanly and
+ *  no fence ever lands. The banner used to sit there narrating an event that was never
+ *  coming, for the rest of the session — on a screen recording that is a caption claiming
+ *  something the grid underneath it plainly is not doing. */
+const CHAOS_ARM_TIMEOUT_MS = 90000;
+
+/** The banner above the grid. It is the only thing on this page allowed to narrate:
+ *  ARMED after KILL A WORKER is pressed, FENCED when the takeover it predicted actually
+ *  lands, EXPIRED when it does not, and hidden otherwise. It exists because the proof —
+ *  an integer incrementing inside one cell of a 30-cell grid — is true but unfilmable.
+ *
+ *  Every visible state carries its own dismissal, so the bar cannot outlive the thing it
+ *  is describing. That is the property that makes it safe to point a camera at. */
+function chaosBar(kind, label, text) {
+  const bar = $('#chaosbar');
+  clearTimeout(chaosBar.t);
+  if (!kind) { bar.hidden = true; bar.className = 'chaosbar'; return; }
+  bar.hidden = false;
+  bar.className = 'chaosbar is-' + kind;
+  $('#cb-lbl').textContent = label;
+  $('#cb-txt').textContent = text;
+
+  if (kind === 'armed') {
+    // Not silence, and not an error either: a chaos worker that found an empty queue and
+    // exited is correct behaviour, and the honest report is that no takeover was observed.
+    chaosBar.t = setTimeout(() => chaosBar('expired', 'NO TAKEOVER OBSERVED',
+      'the chaos worker found nothing to claim · SEED, then KILL A WORKER'), CHAOS_ARM_TIMEOUT_MS);
+  } else {
+    chaosBar.t = setTimeout(() => chaosBar(null), FENCE_CALLOUT_MS);
+  }
 }
 
 function renderTasks(tasks) {
@@ -213,6 +336,7 @@ function renderTasks(tasks) {
   const grid = $('#taskgrid');
   const seen = new Set();
   let newFences = 0;
+  let firstFenced = null;      // the cell to scroll to; a fence off-screen proves nothing
 
   for (const t of tasks) {
     seen.add(t.id);
@@ -243,10 +367,19 @@ function renderTasks(tasks) {
 
     // The fence advanced: another worker took this task over and the previous lease
     // holder's settle is now rejected on sight. This is the money moment of a crash demo.
-    const fenced = prevEpoch !== undefined && Number(t.lease_epoch) > Number(prevEpoch);
+    // A FENCE is a takeover, not a claim. epoch 0 -> 1 is simply the first worker picking
+    // the task up, and flashing that as a fence made the banner announce "FENCE ADVANCED"
+    // thirty times on a fresh seed while the counter underneath it still read 0 — the
+    // counter has always defined a fence as (lease_epoch - 1), and the colour has to
+    // agree with the number or neither is believable.
+    const fenced = prevEpoch !== undefined
+      && Number(t.lease_epoch) > Number(prevEpoch)
+      && Number(t.lease_epoch) >= 2;
     if (fenced) {
       newFences++;
       S.fenced.add(t.id);
+      S.fenceFrom.set(t.id, { from: prevEpoch, to: t.lease_epoch, at: Date.now() });
+      if (!firstFenced) firstFenced = { cell: cell, task: t, from: prevEpoch };
       cell.classList.remove('did-fence');
       void cell.offsetWidth;           // restart the animation on a re-fence
       cell.classList.add('did-fence');
@@ -254,6 +387,9 @@ function renderTasks(tasks) {
       cell.classList.remove('did-change');
       void cell.offsetWidth;
       cell.classList.add('did-change');
+    }
+    if (fenced || (prevState !== undefined && prevState !== t.state) || prevState === undefined) {
+      S.changed = true;
     }
 
     const html = cellHTML(t, S.fenced.has(t.id));
@@ -281,7 +417,23 @@ function renderTasks(tasks) {
     const fm = $('.fence-meter');
     fm.classList.add('is-live');
     $('#fence-delta').textContent = '+' + newFences;
-    setTimeout(() => { fm.classList.remove('is-live'); $('#fence-delta').textContent = ''; }, 2400);
+    // 6s, not 2.4s. This has to survive being scrubbed past in a screen recording.
+    setTimeout(() => { fm.classList.remove('is-live'); $('#fence-delta').textContent = ''; }, 6000);
+
+    if (firstFenced) {
+      const k = String(firstFenced.task.dedupe_key || '').replace(/^order:/, '').replace(/:refund$/, '');
+      // Kept under ~70 characters on purpose: the bar is one line and at 1280px the
+      // sentence that was here before was ellipsised exactly where the meaning was.
+      chaosBar('fenced', 'FENCE ADVANCED',
+        `${k} · lease_epoch e${firstFenced.from} → e${firstFenced.task.lease_epoch}` +
+        (newFences > 1 ? ` · +${newFences - 1} more` : '') +
+        ' · the old lease can no longer settle');
+      // Bring the proof on screen. `nearest` so a fence in the visible rows does not
+      // yank the grid around for no reason.
+      firstFenced.cell.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      // The dismissal timer belongs to chaosBar itself now, so arriving here also cancels
+      // the ARMED timeout — a fence that lands is the answer the banner was waiting for.
+    }
   }
   $('#grid-note').textContent = tasks.length + ' tasks';
 }
@@ -366,7 +518,7 @@ function renderEvents(events) {
       `</div>`;
     frag.insertBefore(row, frag.firstChild);
   }
-  if (frag.childNodes.length) box.insertBefore(frag, box.firstChild);
+  if (frag.childNodes.length) { box.insertBefore(frag, box.firstChild); S.changed = true; }
 
   while (box.children.length > 260) box.removeChild(box.lastChild);
   $('#ev-note').textContent = box.children.length + ' shown';
@@ -671,7 +823,8 @@ async function decide(card, approved) {
       { approved: approved, decided_by: who, note: approved ? 'approved in Mission Control' : 'rejected in Mission Control' });
     toast((approved ? 'approved' : 'rejected') + ' · ' + shortId(id));
     card.remove();
-    tickFast();
+    // A decision unblocks a task: the next second is interesting, so poll it now.
+    P.rung = 0; P.idle = 0; run();
   } catch (e) {
     toast('decision failed: ' + e.message, true);
     btns.forEach((b) => (b.disabled = false));
@@ -821,47 +974,119 @@ async function tickView() {
 }
 
 // ──────────────────────────────────────────────────────────────────── polling ──
+//
+// One loop, not three timers. Every cycle issues three GETs (mission, tasks, events) and,
+// at most every AUX_MIN_MS, five more. The interval between cycles is chosen by adapt()
+// after each pass. On a hidden tab there is no timer scheduled at all — the old build
+// kept firing setInterval and returned early on document.hidden, which costs nothing in
+// requests but leaves a page that has to be told to stop, twice, in two places.
 
-let fastBusy = false;
+/** The five slower reads. Split out because they are 5 of the 8 requests per cycle and
+ *  none of them changes at 1Hz: a heartbeat is 5s, a health check is a database ping,
+ *  and approvals wait on a human. */
+async function aux() {
+  const [health, agents, pstats, unsettled, approvals] = await Promise.all([
+    get('/api/health', null),
+    get('/api/agents', null),
+    get('/api/provider/stats', null),
+    get('/api/receipts/unsettled', []),
+    get('/api/approvals', []),
+  ]);
+  renderHealth(health);
+  if (agents) renderAgents(agents);
+  if (pstats) renderProviderStats(pstats);
+  renderUnsettled(unsettled);
 
-async function tickFast() {
-  if (fastBusy || document.hidden) return;
-  fastBusy = true;
+  const badge = $('#appr-badge');
+  badge.hidden = !approvals.length;
+  badge.textContent = String(approvals.length);
+  // The approvals view is fed from this same response rather than fetching it again,
+  // which is what the previous build did — two identical GETs every four seconds.
+  if (S.view === 'approvals') renderApprovals(approvals);
+  else if (S.view !== 'ops') tickView();
+}
+
+async function tick() {
+  if (P.busy || document.hidden) return;
+  P.busy = true;
+  P.lastTick = Date.now();
   const before = apiFailures;
   try {
-    const [mission, tasks, events, agents, pstats] = await Promise.all([
+    S.changed = false;
+    const [mission, tasks, events] = await Promise.all([
       get('/api/mission', null),
       get('/api/tasks?limit=300', null),
       get('/api/events?limit=60', null),
-      get('/api/agents', null),
-      get('/api/provider/stats', null),
     ]);
     if (mission) renderMission(mission);
     if (tasks) renderTasks(tasks);
     if (events) renderEvents(events);
-    if (agents) renderAgents(agents);
-    if (pstats) renderProviderStats(pstats);
+
+    if (Date.now() - P.lastAux >= AUX_MIN_MS) {
+      P.lastAux = Date.now();
+      await aux();
+    }
 
     const poll = $('.hx[data-k="poll"]');
     const ok = apiFailures === before;
     poll.classList.toggle('is-ok', ok);
     poll.classList.toggle('is-bad', !ok);
     S.booted = true;
+    adapt();
   } finally {
-    fastBusy = false;
+    P.busy = false;
   }
 }
 
-async function tickSlow() {
+/** Pick the next interval. Two inputs only: did anything change, and is a lease held.
+ *  A change resets to 1s outright. A held lease does not reset anything — it only widens
+ *  the stillness the ladder will tolerate before stepping out, because a worker mid-refund
+ *  goes quiet for a second or two and the next second is when the crash lands. Every path
+ *  through here still terminates in backoff; there is no input that pins the fast rung
+ *  open indefinitely, which is the property that keeps an abandoned tab inside the free
+ *  tier. */
+function adapt() {
+  const live = S.tasks.some((t) => LIVE_STATES.has(t.state));
+  if (S.changed) {
+    P.rung = 0;
+    P.idle = 0;
+  } else if (++P.idle >= (live ? IDLE_BEFORE_BACKOFF_LIVE : IDLE_BEFORE_BACKOFF)) {
+    P.idle = 0;
+    P.rung = Math.min(P.rung + 1, LADDER.length - 1);
+  }
+  paintPoll();
+}
+
+function paintPoll() {
+  const rate = $('#poll-rate');
+  const ms = LADDER[P.rung];
+  rate.textContent = document.hidden ? 'PAUSED' : (ms >= 1000 ? (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's' : ms + 'ms');
+  rate.classList.toggle('is-paused', document.hidden);
+  $('#req-count').textContent = P.reqs.toLocaleString('en-US') + ' REQ';
+}
+
+function schedule() {
+  clearTimeout(P.timer);
+  P.timer = null;
   if (document.hidden) return;
-  renderHealth(await get('/api/health', null));
-  renderUnsettled(await get('/api/receipts/unsettled', []));
-  const appr = await get('/api/approvals', []);
-  const badge = $('#appr-badge');
-  badge.hidden = !appr.length;
-  badge.textContent = String(appr.length);
-  if (S.view === 'approvals') renderApprovals(appr);
-  else if (S.view !== 'ops') tickView();
+  P.timer = setTimeout(run, LADDER[P.rung]);
+}
+
+async function run() {
+  await tick();
+  schedule();
+}
+
+/** Something happened that means a human is present: a click, a keystroke, the tab coming
+ *  back to the front. Drop to the fast rung, and if the loop is parked on a long timer,
+ *  do not make them wait out the remainder of a minute. */
+function nudge() {
+  if (document.hidden) return;
+  const wasSlow = P.rung > 1;
+  P.rung = 0;
+  P.idle = 0;
+  if (wasSlow && Date.now() - P.lastTick > 900) run();
+  else { paintPoll(); schedule(); }
 }
 
 // ──────────────────────────────────────────────────────────────────── wiring ──
@@ -926,22 +1151,64 @@ function wire() {
     const b = $('#btn-seed'); b.disabled = true;
     try { const r = await post('/api/demo/seed', { tasks: 30, reset: true }); toast('seeded ' + r.tasks + ' tasks'); resetClientState(); }
     catch (e) { toast('seed failed: ' + e.message, true); }
-    finally { b.disabled = false; tickFast(); }
+    finally { b.disabled = false; nudge(); run(); }
   });
 
   $('#btn-reset').addEventListener('click', async () => {
     const b = $('#btn-reset'); b.disabled = true;
     try { await post('/api/demo/reset', {}); toast('demo state cleared'); resetClientState(); }
     catch (e) { toast('reset failed: ' + e.message, true); }
-    finally { b.disabled = false; tickFast(); }
+    finally { b.disabled = false; nudge(); run(); }
   });
+
+  $('#btn-run').addEventListener('click', () => runWorker('drain'));
+  $('#btn-kill').addEventListener('click', () => runWorker('chaos'));
+}
+
+/** POST /api/demo/run-worker.
+ *
+ *  `drain` starts a worker that claims and settles until the queue is empty. `chaos`
+ *  starts one that dies AFTER the provider has committed a refund and BEFORE AXIOM has
+ *  recorded it — crash window W4, the only window where an effect can exist that the
+ *  ledger does not know about. The button says KILL A WORKER because that is what it
+ *  looks like from the grid; what the API actually does is start a worker that will kill
+ *  itself at the worst possible instant, which is a smaller and more honest power than
+ *  reaching out and SIGKILLing an arbitrary process.
+ *
+ *  Both are one request. The recovery that follows is watched, not driven — nothing in
+ *  this page tells the surviving worker to take the lease over. */
+async function runWorker(mode) {
+  const b = $(mode === 'chaos' ? '#btn-kill' : '#btn-run');
+  b.disabled = true;
+  try {
+    const r = await post('/api/demo/run-worker', { mode: mode, seconds: 60 });
+    const where = r.backend === 'lambda' ? 'lambda ' + (r.function || '') : 'local pid ' + r.pid;
+    if (mode === 'chaos') {
+      S.chaosAt = Date.now();
+      chaosBar('armed', 'CHAOS WORKER DISPATCHED',
+        'it dies mid-refund (W4) · watch for lease_epoch to advance');
+      toast('chaos worker dispatched · ' + where);
+    } else {
+      toast('worker dispatched · ' + where);
+    }
+    // Whatever rung the ladder had backed off to, a mission is now running.
+    P.rung = 0; P.idle = 0;
+    run();
+  } catch (e) {
+    toast((mode === 'chaos' ? 'chaos' : 'run') + ' failed: ' + e.message, true);
+  } finally {
+    // Long enough that a double-click cannot start two workers by accident, short enough
+    // that a second crash is one press away when the first one is being explained.
+    setTimeout(() => { b.disabled = false; }, 2500);
+  }
 }
 
 function resetClientState() {
-  S.epochs.clear(); S.states.clear(); S.fenced.clear(); S.fenceCount = 0;
-  S.seenEvents.clear(); S.lastRecall = null;
+  S.epochs.clear(); S.states.clear(); S.fenced.clear(); S.fenceFrom.clear(); S.fenceCount = 0;
+  S.seenEvents.clear(); S.lastRecall = null; S.chaosAt = 0; S.missionSig = '';
   $('#taskgrid').innerHTML = ''; $('#events').innerHTML = '';
   $('#fence-count').textContent = '0';
+  chaosBar(null);
 }
 
 function boot() {
@@ -951,10 +1218,26 @@ function boot() {
   applyHash(location.hash);
   setInterval(() => { $('#clock').textContent = new Date().toTimeString().slice(0, 8); }, 1000);
   $('#clock').textContent = new Date().toTimeString().slice(0, 8);
+
+  // Local-only timers. paintAgents recomputes heartbeat ages from the last fetch, so the
+  // worker panel keeps counting up between polls without asking the server anything —
+  // which is what lets the poll back off to 60s without the pool looking frozen.
   setInterval(paintAgents, 1000);
-  tickFast(); tickSlow(); tickView();
-  setInterval(tickFast, 1000);
-  setInterval(tickSlow, 4000);
+
+  // The whole point: no timer exists while the tab is hidden. A background tab makes
+  // exactly zero requests, and coming back to the front starts at the fast rung.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { clearTimeout(P.timer); P.timer = null; paintPoll(); }
+    else { P.rung = 0; P.idle = 0; run(); }
+  });
+  // Any evidence of a human resets the ladder. Deliberately not mousemove: a still cursor
+  // over a page nobody is reading would pin the poll at 1s forever.
+  document.addEventListener('click', nudge, true);
+  document.addEventListener('keydown', nudge, true);
+
+  paintPoll();
+  tickView();
+  run();
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

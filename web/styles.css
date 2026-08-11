@@ -776,3 +776,56 @@ pre.json {
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* ══════════════════════════════════════════════════ poll meter + chaos control ══
+ *
+ * Added for the Lambda deployment, where a request is a metered resource rather than a
+ * free local socket. Nothing above this line is restyled; these are new elements only.
+ */
+
+/* The poll readout sits inside the existing .hx lamp, so it inherits its colour and its
+ * OK/BAD state. Bright enough to read at 720p, quiet enough not to compete with DB. */
+.hx b { font-weight: 400; color: var(--dim); letter-spacing: 0.04em; min-width: 34px; }
+.hx b.is-paused { color: var(--faint); }
+.reqs { font-size: 9px; letter-spacing: 0.1em; color: var(--ghost); }
+
+/* KILL A WORKER is not an error, so it does not get --alarm. It gets --hot, the colour
+ * this interface already uses for "a receipt exists and an effect may exist" — which is
+ * precisely the state the button creates. */
+.btn-chaos:hover { color: var(--hot); border-color: #4a3016; background: var(--hot-bg); }
+
+/* ── the recovery banner ──
+ * Full grid width, 12px type, one line. It is the only narration on the page and it is
+ * sized so that a viewer reading a 720p recording can take it in without pausing. */
+.chaosbar {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 7px 10px; margin-bottom: 1px;
+  border: 1px solid var(--rule-2); border-left-width: 2px;
+  background: var(--panel-2);
+  font-size: 11px; color: var(--dim);
+}
+.chaosbar .cb-lbl {
+  font-size: 10px; letter-spacing: 0.16em; color: var(--dim); white-space: nowrap;
+}
+.chaosbar .cb-txt { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.chaosbar.is-armed { border-color: #4a3016; border-left-color: var(--hot); background: var(--hot-bg); }
+.chaosbar.is-armed .cb-lbl { color: var(--hot); animation: cb-pulse 1.4s ease-in-out infinite; }
+
+/* .chaosbar.is-expired has NO rule on purpose. "No takeover observed" is not an alarm and
+ * not a success, so it inherits the neutral base above — the bar goes quiet rather than
+ * changing colour, which is the whole point of having exactly one alarm colour. */
+
+.chaosbar.is-fenced { border-color: var(--hot); border-left-color: var(--hot); background: var(--hot-bg); }
+.chaosbar.is-fenced .cb-lbl { color: var(--hot); font-size: 12px; letter-spacing: 0.14em; }
+.chaosbar.is-fenced .cb-txt { color: var(--text); }
+
+@keyframes cb-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+
+/* The epoch transition, shown for 20s after a takeover. Larger than the chip it replaces
+ * because "e1 → e2" appearing is legible on video where "1" becoming "2" is not. */
+.cell-meta .ep.is-callout {
+  font-size: 11px; color: var(--hot);
+  border-bottom: 1px solid #4a3016; padding-bottom: 1px;
+}
+.cell-meta .ep.is-callout b { font-weight: 400; color: var(--hot); margin: 0 2px; }

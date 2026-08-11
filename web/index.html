@@ -23,13 +23,26 @@
     <div class="health" id="health">
       <span class="hx" data-k="db"><i class="dot"></i>DB</span>
       <span class="hx" data-k="provider"><i class="dot"></i>PROVIDER</span>
-      <span class="hx" data-k="poll"><i class="dot"></i>POLL</span>
+      <!-- The poll interval is on screen because it is a cost control. This demo lives
+           inside Lambda's always-free 1M requests/month and one tab polling every second
+           would spend fifteen times that; the number here is how you can tell it isn't. -->
+      <span class="hx" data-k="poll"
+            title="Adaptive poll: 1s while work is in flight, backing off to 60s when nothing changes, and no timer at all while this tab is hidden."><i class="dot"></i>POLL<b id="poll-rate">—</b></span>
+      <span class="reqs" id="req-count"
+            title="/api requests this tab has made. Lambda's always-free tier is 1,000,000 requests per month.">0 REQ</span>
       <span class="hver" id="hver">—</span>
     </div>
 
     <div class="topright">
       <div class="demo">
         <button class="btn" id="btn-seed" title="POST /api/demo/seed">SEED</button>
+        <button class="btn" id="btn-run"
+                title="POST /api/demo/run-worker {mode:drain} — starts a worker that claims and settles until the queue is empty">RUN MISSION</button>
+        <!-- What this actually posts is {mode:chaos}: it starts a worker that dies after
+             the provider commits a refund and before AXIOM records it (crash window W4).
+             The label is what it looks like from the grid. -->
+        <button class="btn btn-chaos" id="btn-kill"
+                title="POST /api/demo/run-worker {mode:chaos} — starts a worker that will die mid-refund, after the provider has committed and before AXIOM records it (W4)">KILL A WORKER</button>
         <button class="btn btn-danger" id="btn-reset" title="POST /api/demo/reset">RESET</button>
       </div>
       <span class="clock" id="clock">--:--:--</span>
@@ -133,6 +146,14 @@
               <b id="fence-count">0</b>
               <span class="fence-delta" id="fence-delta"></span>
             </div>
+          </div>
+          <!-- The recovery narration. Hidden until KILL A WORKER is pressed, then armed,
+               then switched to the fence that actually landed. It exists because the proof
+               is a single integer incrementing inside one 132px cell, which is true and
+               unwatchable on a screen recording. -->
+          <div class="chaosbar" id="chaosbar" hidden>
+            <span class="cb-lbl" id="cb-lbl">—</span>
+            <span class="cb-txt" id="cb-txt"></span>
           </div>
           <div class="taskgrid" id="taskgrid"></div>
           <div class="view-foot">
