@@ -17,11 +17,15 @@ Three rules this module keeps
    under exactly the concurrency the demo creates. Plain `def` puts them on Starlette's
    threadpool, which is correct and requires no async driver.
 
-3. **There is no kill-worker endpoint.** Killing a process from a web route is a footgun
-   that outlives the demo it was built for — the process it kills is on the same host as
-   the API, and nothing about an HTTP request proves the caller meant it. The chaos
-   demo owns SIGKILL (`scripts/chaos_demo.py`), where the blast radius is a script the
-   operator ran on purpose.
+3. **There is no kill-worker endpoint, and `POST /api/demo/run-worker` is not one.**
+   Killing a process from a web route is a footgun that outlives the demo it was built
+   for: the process it kills is on the same host as the API, and nothing about an HTTP
+   request proves the caller meant it. `run-worker` instead STARTS a worker, and in
+   `chaos` mode starts one configured to crash itself at the worst possible instant.
+   Starting something that will die is a different power from reaching out and killing
+   an arbitrary process — the blast radius is a task this system already recovers from
+   by design. `scripts/chaos_demo.py` still owns real SIGKILL, where the operator ran
+   the script on purpose.
 
 The one endpoint that is a product feature rather than a projection is
 `POST /api/memories/recall`: it returns `plan_uses_vector_index`, read out of a live
@@ -39,7 +43,10 @@ import decimal
 import functools
 import json
 import logging
+import os
 import pathlib
+import subprocess
+import sys
 import typing as t
 import uuid
 
@@ -802,6 +809,63 @@ def demo_seed(body: SeedBody = Body(default=SeedBody())) -> dict:
 def demo_reset() -> dict:
     seed.reset()
     return {'ok': True}
+
+
+class RunWorkerBody(BaseModel):
+    mode: t.Literal['drain', 'chaos'] = 'drain'
+    seconds: int = Field(45, ge=5, le=300)
+
+
+@app.post('/api/demo/run-worker')
+@json_route
+def demo_run_worker(body: RunWorkerBody = Body(default=RunWorkerBody())) -> dict:
+    """Start a worker to drain the queue — optionally one that will die mid-refund.
+
+    This is the demo's control surface, and it is the one place the API starts something
+    that acts on the outside world, so the reasoning is worth stating.
+
+    §3 of this module's docstring says there is no kill-worker endpoint, and that still
+    holds: this does not kill anything. It STARTS a worker, and in `chaos` mode it starts
+    one configured to die at the worst possible instant — after the provider has committed
+    a refund and before AXIOM records it (crash window W4). Starting a process that will
+    crash itself is a different power from reaching out and killing an arbitrary one; the
+    blast radius is a task this system already knows how to recover.
+
+    Two backends, chosen by environment rather than by request, so a caller cannot pick:
+
+      AXIOM_WORKER_LAMBDA set -> asynchronous Lambda invoke (InvocationType='Event').
+        The deployed demo. Async because the worker outlives the HTTP request, and
+        because a synchronous invoke would bill the API's wall-clock time waiting for it.
+      otherwise               -> a detached local subprocess, for laptop demos and the
+        chaos script. Same worker module, same code path.
+    """
+    fn = os.environ.get('AXIOM_WORKER_LAMBDA')
+    chaos = body.mode == 'chaos'
+
+    if fn:
+        payload = json.dumps({'mode': body.mode, 'seconds': body.seconds,
+                              'chaos_post': 1.0 if chaos else 0.0})
+        try:
+            import boto3
+            resp = boto3.client('lambda').invoke(
+                FunctionName=fn, InvocationType='Event', Payload=payload.encode())
+        except Exception as e:                       # noqa: BLE001
+            raise HTTPException(502, f'could not invoke worker lambda {fn}: {e}') from e
+        return {'ok': True, 'backend': 'lambda', 'function': fn, 'mode': body.mode,
+                'status': resp.get('StatusCode')}
+
+    env = dict(os.environ)
+    if chaos:
+        # 1.0 = certain death, and specifically AFTER the refund has landed. A
+        # probabilistic kill makes a demo that sometimes proves nothing.
+        env['AXIOM_CHAOS_POST'] = '1.0'
+    proc = subprocess.Popen(
+        [sys.executable, '-m', 'axiom.worker', '--idle-exit',
+         '--ref', f'demo-{"chaos" if chaos else "drain"}-{uuid.uuid4().hex[:6]}'],
+        cwd=str(REPO_ROOT), env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)      # survives this request; not our child to reap
+    return {'ok': True, 'backend': 'subprocess', 'pid': proc.pid, 'mode': body.mode}
 
 
 # ======================================================================= STATIC UI
