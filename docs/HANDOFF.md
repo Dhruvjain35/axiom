@@ -2,10 +2,11 @@
 
 **Written 2026-08-10. Last updated 2026-08-10 (build session 2). Deadline 2026-08-18 17:00 EDT.**
 
-> **Status in one line:** AXIOM is BUILT, TESTED and PROVEN on a local cluster —
-> 30/30 tasks through 22 SIGKILLs with zero duplicate refunds, 49/49 tests passing, and
-> the core CockroachDB claim verified. What remains is not construction, it is
-> **moving to CockroachDB Cloud, deploying to AWS, and recording the video** (§7).
+> **Status in one line:** AXIOM is BUILT, TESTED and PROVEN **on CockroachDB Cloud** —
+> 30/30 tasks through 30 SIGKILLs with zero duplicate refunds, 49/49 tests passing, 16/16
+> preflight gates, and the core claim verified on a real distributed cluster.
+> What remains is **deploying to AWS, wiring the Managed MCP transport, and the video** (§7).
+> Public repo: **https://github.com/Dhruvjain35/axiom**
 >
 > Jump to: §5 what exists · §5.3 the claim, proven · §5.4 the demo numbers ·
 > §5.5 the four real bugs · §5.6 what the verifiers caught · §7 what is left · §12 session log.
@@ -904,3 +905,79 @@ deploy, docs, and the two engine fixes), plus this update.
 - ⚠️ **The suite's exclusivity guard checks once at startup.** A worker that starts
   mid-run silently steals its tasks and produces spurious failures. Loud and
   self-explaining, but confusing at 3am — worth hardening.
+
+
+---
+
+## 13. Session log — 2026-08-11: onto CockroachDB Cloud
+
+The blocker named at the top of §11 is **cleared**. AXIOM now runs on the real cluster.
+
+**Repo is public:** https://github.com/Dhruvjain35/axiom — three commits, history intact
+as proof of the "newly created during the submission period" rule. Scanned every tracked
+file for credentials before pushing; clean (all "token" hits were the fencing token).
+
+**Cloud access, via `ccloud` (a required tool, now genuinely exercised):**
+
+```bash
+brew install cockroachdb/tap/ccloud
+ccloud auth login                                    # browser; must be a real terminal
+ccloud cluster list                                  # axiom-memory, b8325d1b-…, BASIC, AWS, v26.2.5
+ccloud cluster user create axiom-memory axiom_app --password "<generated>"
+ccloud cluster connection-string axiom-memory --sql-user axiom_app
+```
+
+⚠️ **Two things that will cost you an hour if you do not know them:**
+
+1. **`ccloud auth login` needs a real TTY.** Run it in Terminal.app, not through a
+   non-interactive shell — it prompts for ENTER before opening the browser and dies with
+   `terminal input required` otherwise.
+2. **Cloud BASIC uses its own CA, and the system trust store does NOT verify it.** Both
+   `sslmode=verify-full` alone and `sslrootcert=system` fail. Fetch the cluster cert once:
+   ```bash
+   curl --create-dirs -o ~/.postgresql/root.crt \
+     "https://cockroachlabs.cloud/clusters/b8325d1b-96ec-428f-b295-021f77f417a9/cert"
+   ```
+   Then `?sslmode=verify-full` works with no `sslrootcert` parameter at all.
+
+**The SQL user password is NOT in the repo.** It is in this session's scratchpad at
+`.../scratchpad/.cloudpw` (mode 600, outside the repo). Scratchpads are session-scoped — if
+you cannot find it, do not hunt: mint a new one with
+`ccloud cluster user password axiom-memory axiom_app`.
+
+**Migrations applied to Cloud in the corrected order** `001 → 003 → 002`. All clean.
+
+**Results on CockroachDB Cloud v26.2.5** — these are the numbers the submission should quote:
+
+```
+preflight       16/16 blocking gates passed (1 advisory)
+pytest          49 passed in 222s
+chaos demo      30/30 tasks terminal · 30 SIGKILLs · 42 restarts · 3 approvals answered
+                18 refunds · $2,042.04 · 6 idempotent replays · DUPLICATE REFUNDS 0
+```
+
+Nothing about the result depended on topology — the local run gave the same shape (33
+kills, 5 replays, 0 duplicates) — but the Cloud run is the one with real latency and real
+contention, and it is the one that may be called "CockroachDB Cloud" in the submission.
+
+One environment fact worth carrying: **`gc.ttlseconds` is 4500 on Cloud BASIC** (75 min)
+versus 14400 locally. The `AS OF SYSTEM TIME` rewind feature therefore reaches back ~75
+minutes, not arbitrarily far. `valid_from`/`valid_until` on `axiom_memory` remain the
+durable audit axis; MVCC history is a convenience. This is now stated in the README.
+
+**Docs updated** to Cloud numbers throughout: README (results block, Cloud setup path via
+`ccloud`, tools table — `ccloud CLI` moved from *"Not yet used"* to **in use, verified** —
+and Limitations), `docs/SUBMISSION.md`, `docs/CRASH_WINDOWS.md`.
+
+### Still open after this session
+
+- ❌ **Not deployed.** No ECS, no ALB, no demo URL. Terraform written and validated only.
+- ❌ **Managed MCP transport still unexercised.** It needs a Cloud **service-account API
+  key**, which is a *different credential* from the `ccloud` browser login — that is the
+  distinction that was not obvious. Mint one at Cloud console → Access Management →
+  Service Accounts, then set `CC_API_KEY`. This is a required tool; do not leave it.
+- ❌ **No CI, no video, nothing submitted.**
+- ⚠️ **Eligibility (§11.1) is still unanswered by the operator.**
+- ⚠️ **Cluster is single-region BASIC.** No `REGIONAL BY ROW`, no survival goal, so nothing
+  here demonstrates surviving region loss. Highest-ceiling remaining idea (§9.7), and the
+  first thing to cut if the schedule slips.

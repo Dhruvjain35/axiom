@@ -7,7 +7,7 @@ built but not yet exercised, or written but not yet deployed, and they are marke
 Submitting them as finished would overstate the project — a bad trade for an entry whose
 whole argument is that systems should tell the truth about what they have done.
 
-*Status as of 2026-08-11: the engine, the test suite (49 passing, including regression tests over two defects it found and that are now fixed
+*Status as of 2026-08-11: the engine, the test suite (49 passing on Cloud, including regression tests over two defects it found and that are now fixed
 known defects, all seven crash windows covered),
 the chaos demo, the HTTP API, the audit agent and Mission Control exist and run. Nothing is
 deployed, nothing has run against a distributed cluster, and there is no public demo URL or
@@ -67,17 +67,20 @@ capability tokens, memory quarantine that takes effect atomically at commit, pro
 trust tiers on every memory, multi-tenancy from row one, and an append-only journal where
 every state transition is written in the same transaction as the transition itself.
 
-**Measured, on 2026-08-11, against a single-node CockroachDB v26.2.3:**
+**Measured, on 2026-08-11, against CockroachDB Cloud v26.2.5** (`axiom-memory`, BASIC,
+AWS `us-east-1`):
 
 ```
-  workers SIGKILLed       45
-  worker restarts         56
+  workers SIGKILLed       30
+  worker restarts         42
   tasks terminal          30/30
   refunds created         18
   dollars moved           $2,042.04
-  idempotent replays      7
+  idempotent replays      6
   DUPLICATE REFUNDS       0
 ```
+
+On the same cluster: `preflight.py` **16/16 blocking gates**, `pytest` **49 passed**.
 
 AXIOM's books and the provider's independent ledger reconcile exactly: 18 receipts against
 18 refund rows, 18 distinct idempotency keys on both sides, `spent_cents` 204,204 against
@@ -142,7 +145,7 @@ release, which is what an OOM kill and a spot reclamation actually look like. Th
 run against the provider's separate database. The script fails on zero replays, because a run
 where no crash landed in the dangerous window proved nothing.
 
-**Stack:** CockroachDB v26.2.3 (SERIALIZABLE, C-SPANN vector indexes, `AS OF SYSTEM TIME`),
+**Stack:** CockroachDB Cloud v26.2.5 (SERIALIZABLE, C-SPANN vector indexes, `AS OF SYSTEM TIME`), provisioned and migrated with the `ccloud` CLI,
 Python 3.14 / psycopg3, Amazon Bedrock (Titan Text Embeddings V2 at 1024 dimensions, Claude
 Sonnet for triage).
 

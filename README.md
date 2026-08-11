@@ -49,27 +49,39 @@ column the application never supplies.
 ## Measured results
 
 Not a description of what it should do. This is the output of `scripts/chaos_demo.py`, run
-on 2026-08-11 against an isolated single-node CockroachDB v26.2.3, `AXIOM_OFFLINE=1`:
+on 2026-08-11 against **CockroachDB Cloud v26.2.5** (cluster `axiom-memory`, BASIC plan,
+AWS `us-east-1`), with `AXIOM_OFFLINE=1` so the run needs no model credentials:
 
 ```
 ====================================================================
 AXIOM chaos demo — result
 ====================================================================
-  wall clock                85.2s
-  workers SIGKILLed       45
-  worker restarts         56
+  wall clock                94.1s
+  workers SIGKILLed       30
+  worker restarts         42
   approvals answered      3   (policy sent them to a human)
   tasks terminal          30/30   {'SUCCEEDED': 27, 'DEAD_LETTER': 3}
   ----------------------------------------------------------------
   refunds created         18
   dollars moved           $2,042.04
-  idempotent replays      7   (re-sends the provider absorbed)
-  provider verdicts       {'created': 18, 'replayed': 7}
+  idempotent replays      6   (re-sends the provider absorbed)
+  provider verdicts       {'created': 18, 'replayed': 6}
   DUPLICATE REFUNDS       0
 ====================================================================
 
-PASS: 45 kills, 7 re-sends absorbed by the provider, 0 duplicate refunds.
+PASS: 30 kills, 6 re-sends absorbed by the provider, 0 duplicate refunds.
 ```
+
+The same run against an isolated single-node **v26.2.3** on a laptop: 33 kills, 5 replays,
+0 duplicates, 62.4 s. The result does not depend on the topology; the Cloud run is simply
+the one whose latency and contention are real.
+
+Alongside it, on the same Cloud cluster:
+
+| | |
+| --- | --- |
+| `scripts/preflight.py` | **16/16 blocking gates pass** (1 advisory characterization) |
+| `pytest` | **49 passed** in 222 s — every crash window and structural invariant |
 
 The demo **SIGKILL**s a random live worker every 1.8 seconds. Not `SIGTERM` — no signal
 handler runs, no `finally` block runs, no lease is politely released. That is what an OOM
@@ -255,7 +267,25 @@ index is shaped the way it is — is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE
 ## Setup
 
 Verified end to end on 2026-08-11 by running these exact commands against a clean cluster:
-macOS 26.4 (arm64), Python 3.14.5, CockroachDB v26.2.3.
+macOS 26.4 (arm64), Python 3.14.5, CockroachDB v26.2.3 locally and v26.2.5 on Cloud.
+
+> **Running against CockroachDB Cloud instead?** Skip steps 1–2 and provision with the
+> `ccloud` CLI — this is also how the measured results above were produced:
+>
+> ```bash
+> brew install cockroachdb/tap/ccloud
+> ccloud auth login                                    # opens a browser
+> ccloud cluster create basic axiom-memory --cloud aws --region us-east-1
+> ccloud cluster user create axiom-memory axiom_app --password "$(openssl rand -base64 24)"
+> ccloud cluster connection-string axiom-memory --sql-user axiom_app
+>
+> # Cloud uses its own CA, so fetch the cluster cert once:
+> curl --create-dirs -o ~/.postgresql/root.crt \
+>   "https://cockroachlabs.cloud/clusters/<CLUSTER_ID>/cert"
+> ```
+>
+> Then use `?sslmode=verify-full` in `DATABASE_URL` and continue from step 3.
+> `scripts/provision_ccloud.sh` wraps all of this.
 
 **1. Get CockroachDB v25.4 or newer.** Vector indexing went GA in v25.4; it was Preview and
 default-off before that. The schema asserts rather than assumes, so an older cluster fails
@@ -343,9 +373,12 @@ Verified: 6/6 tasks terminal, 4 refunds, 0 kills, in 2.9 seconds.
 ./.venv/bin/python -m pytest -q
 ```
 
-49 tests, **all 49 passing**. Both defects that the suite originally pinned as strict-`xfail` — an unanswered approval that never self-healed, and attempt exhaustion that stranded a task in `READY` — have since been fixed in `axiom/tasks.py`, and those tests now stand as ordinary regression tests.
-approval does not self-heal; attempt exhaustion strands a task instead of dead-lettering it).
-Both are described in Limitations. The suite does not assert that AXIOM works;
+49 tests, **all 49 passing** — verified on both the local node and CockroachDB Cloud.
+Two of them began as strict `xfail`s pinning real defects this suite found (an approval
+that never self-healed, and attempt exhaustion that stranded a task in `READY`); both are
+fixed in `axiom/tasks.py` and those tests now guard the fix.
+
+The suite does not assert that AXIOM works;
 it assembles the exact conditions under which the design would corrupt state — an expired
 lease mid-refund, two workers holding the same fence, a recovered agent that re-synthesized a
 different request body, threads racing one budget — and asserts that the system refuses. All
@@ -392,7 +425,7 @@ the point of the provider interfaces in `embeddings.py` and `llm.py`.
 | `web/` | Mission Control front end. |
 | `deploy/terraform/`, `Dockerfile` | Deployment infrastructure. Written, not applied — see Limitations. |
 | `scripts/chaos_demo.py` | The headline demo. |
-| `scripts/preflight.py` | 17 gates against a live cluster. |
+| `scripts/preflight.py` | 17 gates against a live cluster: 16 blocking (all pass on Cloud) + 1 advisory. |
 | `docs/ARCHITECTURE.md` | The deep version: protocols, SQL, index design. |
 | `docs/CRASH_WINDOWS.md` | One page per crash window, W1–W7, with what covers each. |
 
@@ -405,9 +438,9 @@ what is wired and verified, and what is not.
 
 | Tool | Status | How AXIOM uses it |
 | --- | --- | --- |
-| **Distributed Vector Indexing** | **In use, verified** | Two C-SPANN indexes on `axiom_memory.embedding`: `axiom_memory_ann_by_context` (four prefix columns, the recovery path) and `axiom_memory_ann_by_tenant` (broad recall). `vector_cosine_ops` written explicitly, because omitting the opclass silently gives L2 and a `<=>` query then full-scans. Index use asserted from `EXPLAIN`, not assumed. |
-| **Cloud Managed MCP Server** | **Built; Cloud transport not yet exercised** | `axiom/audit_mcp.py` speaks to the Managed MCP Server over streamable HTTP with a scoped read-only service-account key, discovering tool argument names from `tools/list` rather than guessing them. It also has a LOCAL mode over a plain read-only connection, which **is** verified: `python -m axiom.audit_mcp "was any order ever refunded twice?"` returns *"No. Zero orders appear more than once in the provider ledger"* with the generated SQL shown. The Cloud path is unexercised because the cluster's service-account key is not available in this environment. Containment is three independent layers: the `axiom_audit` role (`db/002_audit_role.sql`) has `SELECT` and nothing else, a statement guard rejects anything that is not a single `SELECT`/`WITH`, and the login is `default_transaction_read_only`. |
-| **ccloud CLI** | **Not yet used** | Design intent: cluster provisioning and schema migration reproducible from the CLI. Everything measured here ran on a local single node; see Limitations. |
+| **Distributed Vector Indexing** | **In use, verified on Cloud** | Two C-SPANN indexes on `axiom_memory.embedding`: `axiom_memory_ann_by_context` (four prefix columns, the recovery path) and `axiom_memory_ann_by_tenant` (broad recall). `vector_cosine_ops` written explicitly, because omitting the opclass silently gives L2 and a `<=>` query then full-scans. Index use asserted from `EXPLAIN`, not assumed. |
+| **Cloud Managed MCP Server** | **Built; Cloud transport not yet exercised** | `axiom/audit_mcp.py` speaks to the Managed MCP Server over streamable HTTP with a scoped read-only service-account key, discovering tool argument names from `tools/list` rather than guessing them. It also has a LOCAL mode over a plain read-only connection, which **is** verified: `python -m axiom.audit_mcp "was any order ever refunded twice?"` returns *"No. Zero orders appear more than once in the provider ledger"* with the generated SQL shown. The Cloud MCP path remains unexercised: it needs a Cloud **service-account API key**, which is a different credential from the `ccloud` browser login used for everything else here, and one has not been minted yet. Containment is three independent layers: the `axiom_audit` role (`db/002_audit_role.sql`) has `SELECT` and nothing else, a statement guard rejects anything that is not a single `SELECT`/`WITH`, and the login is `default_transaction_read_only`. |
+| **ccloud CLI** | **In use, verified** | The cluster the measured results ran on (`axiom-memory`, BASIC, AWS `us-east-1`, v26.2.5) is administered entirely through `ccloud`: `auth login`, `cluster list`, `cluster user create axiom_app`, `cluster connection-string`. `scripts/provision_ccloud.sh` wraps provisioning + all three migrations, and the Cloud path in Setup is the CLI transcript that actually worked. |
 | **Agent Skills Repo** | **Not yet used** | Design intent: contribute a crash-safe-queue skill capturing the partial-index / fencing-token / never-DELETE pattern. |
 
 ## AWS services used
@@ -436,17 +469,22 @@ the difference between a system you can reason about and a marketing claim.
 Stated plainly, because a limitations section that only lists comfortable limitations is a
 marketing document.
 
-- **Everything measured here ran on a single local node**, not on a distributed CockroachDB
-  Cloud cluster. Single-node numbers understate real 40001 contention, real network latency,
-  and the actual behaviour of distributed vector index maintenance. The Cloud cluster exists
-  and its DDL was accepted, but its credentials are not available in this environment, so no
-  number in this README should be read as a distributed-cluster measurement.
+- **The Cloud cluster is BASIC, single-region `aws-us-east-1`.** Every number here was
+  measured on it, so latency and 40001 contention are real — but a BASIC cluster is not a
+  multi-region deployment, and AXIOM does not yet use `REGIONAL BY ROW` or a survival goal.
+  Nothing here demonstrates surviving the loss of a region; that is the obvious next step
+  and it is not built.
+- **`gc.ttlseconds` is 4500 on that cluster (75 minutes).** The `AS OF SYSTEM TIME` rewind
+  feature cannot look further back than the GC window, so "rewind" means the last ~75
+  minutes, not arbitrary history. That is exactly why `valid_from` / `valid_until` exist on
+  `axiom_memory` as the durable audit axis — MVCC history is a convenience, not the record.
 - **Nothing is deployed.** `Dockerfile` and `deploy/terraform/` are written but have never
   been applied. There is no ECS service, no ALB, and no public demo URL. The system runs from
   a shell.
-- **The test suite runs against a live cluster, not in CI.** All 49 tests pass and all
-  seven crash windows have one, but there is no CI pipeline running them on every commit.
-  "Passes when a human runs it" is weaker than "cannot regress".
+- **The test suite runs against a live cluster, not in CI.** All 49 tests pass — on both the
+  local node (24 s) and CockroachDB Cloud (222 s) — and all seven crash windows have one, but
+  there is no CI pipeline running them on every commit. "Passes when a human runs it" is
+  weaker than "cannot regress".
 - **Two defects the suite found, both since fixed — and worth stating because of where
   they lived.** (1) An approval nobody answered never self-healed: nothing in the codebase
   ever set `ApprovalState.EXPIRED`, so the re-park hit `23505` on
@@ -458,8 +496,9 @@ marketing document.
   chaos demo never saw the first one because `auto_approve()` answers within 250 ms.
   Whatever branch your demo skips is where your bugs are.
 - **The Cloud Managed MCP transport is unexercised.** The audit agent's LOCAL mode is
-  verified; its Cloud MCP mode has never made a real connection, because the service-account
-  key is not available here. The code discovers tool arguments at connect time rather than
+  verified; its Cloud MCP mode has never made a real connection. It needs a Cloud
+  service-account API key, which is a different credential from the `ccloud` browser login
+  used to provision and migrate the cluster, and one has not been minted. The code discovers tool arguments at connect time rather than
   hard-coding them, which is the right design, but untested against the real endpoint is
   untested.
 - **The LLM is a small part of this system, deliberately.** Triage proposes an action. It

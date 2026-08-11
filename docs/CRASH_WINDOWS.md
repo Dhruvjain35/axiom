@@ -261,7 +261,7 @@ replayed    200           02:56:30.223
 
 Final ledger: one row, `re_da08deb5287c47899857`, `$169.40`, `replay_count = 2`.
 
-Across the whole run: 45 SIGKILLs, 7 idempotent replays absorbed, 18 refunds requested and
+Across the whole run (CockroachDB Cloud v26.2.5): 30 SIGKILLs, 6 idempotent replays absorbed, 18 refunds requested and
 18 refund rows created, `0` orders refunded more than once. AXIOM's `spent_cents` (204,204)
 equals the provider's `sum(amount_cents)` (204,204), reconciled independently.
 
