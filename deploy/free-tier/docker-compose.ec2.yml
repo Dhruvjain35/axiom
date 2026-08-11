@@ -54,7 +54,12 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      # 90s, not 20s. Startup runs real connectivity checks against CockroachDB Cloud
+      # and the provider database before serving, and that is a cross-region round trip
+      # from us-east-2 on a burstable instance. Measured locally at >12s against a node
+      # on the same machine; a too-tight start_period would mark a perfectly healthy
+      # container unhealthy and restart-loop it forever.
+      start_period: 90s
 
   worker-1:
     <<: *worker

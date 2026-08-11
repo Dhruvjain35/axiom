@@ -10,15 +10,28 @@ that honestly, with the numbers stated rather than hand-waved.
 | **Application Load Balancer** | **~$0.0225/hr ≈ $16.40/month**, no free tier, billed whether or not anyone visits | **Cut.** This was ~half the original estimate and buys nothing a judge can see. |
 | **ECS Fargate** | ~$0.04/vCPU-hr + $0.004/GB-hr, **no free tier** | **Cut.** ~$9/month for 0.25 vCPU running continuously. |
 | **NAT Gateway** | ~$32/month | **Never needed.** A public subnet with a public IP is free. |
-| **EC2 `t3.micro`** | $0 if the account's free tier covers it, otherwise ~$7.50/month | **Used.** One instance runs the API and three workers. |
-| **EBS gp3, 20 GB** | $0 if free-tier covered, otherwise ~$1.60/month | Used. |
+| **EC2 `t4g.micro`** | **$0.00840/hr = $6.13/month** | **Used.** 1 GB, ARM. Runs the API and three workers. |
+| **EC2 `t3.micro`** (x86 alternative) | $0.01040/hr = $7.59/month | Only if an ARM image is a problem. |
+| **EC2 `t4g.nano`** | $0.00420/hr = $3.07/month | **Rejected: 0.5 GB.** The image build alone will not fit. |
+| **EBS gp3, 8 GB** | $0.08/GB-month = $0.64/month | Used. 20 GB would be $1.60. |
 | **Public IPv4 address** | ~$3.60/month since Feb 2024 — **charged even on free-tier instances** | Unavoidable for a public URL. |
 | **Data transfer out** | 100 GB/month free | Free at demo volume. |
 | **CockroachDB Cloud BASIC** | free tier | Free. |
 | **Amazon Bedrock** | per token | Pennies. A 30-task mission is ~$0.0001; an idle deployment calls it zero times. |
 
-**Realistic total: $0–4/month**, and the only line that is genuinely unavoidable is the
-public IPv4 charge.
+**Measured total on this account: ~$10.40/month** — `t4g.micro` $6.13 + IPv4 ~$3.65 +
+8 GB gp3 $0.64 — which is **~$14 from Aug 11 through the Sep 21 winners announcement.**
+
+Those instance prices are not estimates: they were pulled from the AWS Pricing API for
+`us-east-2` on 2026-08-11. Re-check them for another region before quoting them.
+
+⚠️ **This account gets no free tier.** `aws freetier get-account-plan-state` reports
+`accountPlanType: PAID` with `accountPlanRemainingCredits: $0.00`, and
+`get-free-tier-usage` returns zero rows. AWS advertises up to $200 in credits for new
+accounts ($100 immediately), so if that is missing it is worth chasing in **Billing →
+Credits** before launching anything — with credits the entire deployment, Bedrock
+included, is free. There is no public API for promotional credits; the console is the
+only authority.
 
 > **Check which free tier you are on before launching.** AWS changed the deal in mid-2025:
 > accounts created before then get the old 12-months-of-750-hours; newer accounts get a
