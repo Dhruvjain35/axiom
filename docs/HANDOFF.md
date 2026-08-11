@@ -5,9 +5,10 @@
 > **Status in one line:** AXIOM is BUILT, TESTED and PROVEN **on CockroachDB Cloud** —
 > 30/30 tasks through 30 SIGKILLs with zero duplicate refunds, 49/49 tests passing, 16/16
 > preflight gates, and the core claim verified on a real distributed cluster.
-> **All four required CockroachDB tools are now in use and verified** (§14).
-> What remains is **deploying to AWS and recording the video** (§7) — and AWS is blocked
-> on the operator naming an account (§11.3).
+> **All four required CockroachDB tools are in use and verified** (§14). **AWS Lambda is
+> deployed and working at $0** (§15) — but its public URL is blocked by AWS on an
+> hours-old account, which is the one open item.
+> What remains: **unblock the URL, then record the video** (§15.4).
 > Public repo: **https://github.com/Dhruvjain35/axiom**
 >
 > Jump to: §5 what exists · §5.3 the claim, proven · §5.4 the demo numbers ·
@@ -1065,3 +1066,132 @@ repo                        https://github.com/Dhruvjain35/axiom (public, 6 comm
 **Blocked and needs the operator:** an AWS account to deploy into. `solace-dev`
 (`704229156617`) is explicitly ruled out. Nothing is deployed; there is no demo URL, and
 that URL has to answer through Sep 15.
+
+
+---
+
+## 15. Session log — 2026-08-11 (evening): the $0 AWS deployment
+
+### 15.1 The constraint that shaped everything
+
+The operator has **no money and no AWS credits.** Verified, not assumed:
+
+```
+aws freetier get-account-plan-state -> accountPlanType: PAID, remainingCredits $0.00
+Billing -> Credits console                "You don't have any redeemable credits"
+aws freetier get-free-tier-usage    -> zero rows
+```
+
+AWS replaced the old free tier in mid-2025. New accounts get credits instead of the
+12-month 750-hours-of-EC2 offer, and this account got neither. So the earlier plan —
+ECS Fargate behind an ALB — was simply wrong for the situation:
+
+| | real price (Pricing API, us-east-2, 2026-08-11) |
+| --- | --- |
+| Application Load Balancer | **$16.40/mo**, no free tier, billed idle |
+| ECS Fargate (0.25 vCPU) | ~$9/mo, no free tier |
+| EC2 t4g.micro | $6.13/mo · t3.micro $7.59/mo · t4g.nano $3.07/mo (0.5 GB, too small) |
+| Public IPv4 | ~$3.65/mo — charged **even on free-tier instances** |
+
+**Lambda's 1M requests + 400,000 GB-seconds/month is ALWAYS-free**, not a 12-month offer,
+and Function URLs are free. CloudFront's 1 TB + 10M requests/month is also perpetual. That
+is the only shape that costs nothing, so that is what the demo runs on.
+
+`deploy/free-tier/` (one EC2 box, ~$10.40/mo) and `deploy/terraform/` (ECS + ALB) both
+remain in the repo. The ECS module is worth showing a judge as the production architecture;
+neither should be running during judging.
+
+### 15.2 What is deployed and working
+
+Account **034971967323**, region **us-east-2**, profile `axiom` in `~/.aws/credentials`.
+
+```
+axiom-api      512 MB, 30s   FastAPI via Mangum, UI served from inside the ZIP
+axiom-worker   512 MB, 300s  drains the queue within the Lambda deadline
+```
+
+✅ **Both VERIFIED working by direct invoke:**
+
+```
+axiom-api    -> {"ok":true,"db":true,"provider":true,"version":"0.1.0","offline":true}
+axiom-worker -> {"tasks":1,"crashes":0,"stopped_by":"idle","elapsed_ms":2634,
+                 "pool":{"pool_size":2,"max_size":2}}
+```
+
+That means the hard part is done: a Lambda in us-east-2 talking to CockroachDB Cloud in
+us-east-1 over TLS with the cluster CA shipped in the ZIP, plus the separate provider
+database, with a connection pool sized for Lambda's per-container model.
+
+✅ **Cost audit — zero billable resources.** 2 Lambda functions + 1 CloudFront
+distribution, both always-free. No EC2, ECR, S3, NAT or ALB anywhere in the account.
+
+✅ **64 tests pass** (49 + 15 new Lambda worker tests).
+
+### 15.3 THE OPEN BLOCKER — read this first
+
+**The public HTTP endpoint returns `403 AccessDeniedException`.** Every layer is
+textbook-correct and was rebuilt from scratch to be sure:
+
+```
+AuthType                     NONE                (recreated the URL from scratch)
+resource policy              Allow / Principal "*" / lambda:InvokeFunctionUrl
+                             Condition lambda:FunctionUrlAuthType = NONE
+```
+
+Also tried, and also 403: CloudFront in front with origin access control
+(`OriginAccessControlOriginType: lambda`, signing `always`, `AllViewerExceptHostHeader`
+origin policy, matching `SourceArn` in the Lambda policy — all correct).
+
+**The functions themselves work. Only ingress is refused.** The account was created hours
+earlier the same day, and AWS commonly gates public endpoints on new accounts until
+activation completes — public Lambda URLs being an obvious abuse vector.
+
+**What to try, in order:**
+
+1. **Wait, then retest.** Activation can take up to ~24h. One command:
+   `curl -sS https://a4ozyrv3noyq4ziekjzvdfdeqi0zjcgn.lambda-url.us-east-2.on.aws/api/health`
+   If it returns `{"ok":true,...}` the deployment is finished and nothing else is needed.
+2. **Check the account is fully activated** — AWS emails when it is; Billing → Account
+   also shows it. A payment method may need confirming.
+3. If it is still refused after activation, open a **free Basic support case** ("Account
+   and billing"). This is a known new-account restriction and support lifts it.
+4. **Fallback if AWS will not budge:** Bedrock already satisfies the ≥1 AWS service
+   requirement, so host the URL on any free service that sleeps when idle and state that
+   plainly in the submission. Do not fake it.
+
+### 15.4 What remains for the submission
+
+- ❌ **Public demo URL** — §15.3. Everything behind it is built and working.
+- ❌ **The video.** Beat-by-beat script with timestamps is in `docs/SUBMISSION.md`. Under
+  3 minutes, hard limit.
+- ❌ **Devpost submission.** Draft is in `docs/SUBMISSION.md`. Submit **Aug 17**, not the 18th.
+- ⚠️ **The Lambda work was NOT adversarially verified.** All three verify agents died on a
+  session limit. Every earlier workstream was re-run by an independent agent that caught
+  real defects; this one was not. Treat `deploy/lambda/`, `axiom/lambda_worker.py` and the
+  `web/` polling changes as tested-by-their-author only.
+- ⚠️ **`web/` polling changes are unreviewed by a second pair of eyes.** The claim is that
+  polling backs off and stops on a hidden tab — which matters, because one browser tab left
+  open for a month is ~2.6M requests and the free limit is 1M. **Verify this yourself
+  before leaving the demo up for a month of judging.**
+
+### 15.5 Credentials, and rotating them
+
+All three of these went through a chat transcript. **Rotate after Sep 21:**
+
+- AWS access key `AKIAQQJD535N4QMRRFB4` — has **AdministratorAccess**. Rotate first.
+- CockroachDB Cloud service-account API key (MCP audit agent).
+- The `axiom_app` SQL password (in this session's scratchpad, not in the repo —
+  if lost, mint a new one with `ccloud cluster user password axiom-memory axiom_app`).
+
+### 15.6 Where the project actually stands
+
+```
+CockroachDB tools   4/4 in use and verified
+AWS services        Bedrock verified · Lambda deployed and working
+Cloud cluster       preflight 16/16 · pytest 64 · chaos 30/30, 0 duplicate refunds
+counterexample      baseline 2 refunds vs AXIOM 1, same crash instant
+repo                https://github.com/Dhruvjain35/axiom — public, 12 commits
+cost to date        $0.00
+```
+
+The engineering is done. What is left is one AWS permission, a video, and a form.
