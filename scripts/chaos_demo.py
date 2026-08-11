@@ -83,6 +83,23 @@ def auto_approve(note: str = 'auto-approved by the chaos demo operator') -> int:
     return db.tx(_decide)
 
 
+def mission_order_refs() -> list[str]:
+    """The order refs this run's mission touched.
+
+    The provider ledger is append-only and SHARED across runs — and
+    scripts/counterexample.py deliberately double-refunds a baseline order to prove its
+    point. Auditing globally would therefore let another script's intentional duplicate
+    fail this run, so the audit is scoped to the orders this mission actually issued.
+    """
+    def _q(cur):
+        cur.execute("""
+            SELECT payload->>'order_ref' AS order_ref FROM axiom_task
+            WHERE tenant_id = %s AND payload->>'order_ref' IS NOT NULL
+        """, (str(seed_mod.DEMO_TENANT),))
+        return [r['order_ref'] for r in cur.fetchall()]
+    return db.tx(_q, readonly=True)
+
+
 def outstanding() -> tuple[int, int, dict]:
     def _q(cur):
         cur.execute("""
@@ -169,8 +186,9 @@ def main() -> int:
 
     # ------------------------------------------------------------------- the audit
     done, total, by_state = outstanding()
-    stats = provider.stats()
-    dupes = provider.duplicate_check()
+    refs = mission_order_refs()
+    stats = provider.stats(refs)
+    dupes = provider.duplicate_check(refs)
 
     print('\n' + '=' * 68)
     print('AXIOM chaos demo — result')

@@ -482,7 +482,7 @@ what is wired and verified, and what is not.
 | Tool | Status | How AXIOM uses it |
 | --- | --- | --- |
 | **Distributed Vector Indexing** | **In use, verified on Cloud** | Two C-SPANN indexes on `axiom_memory.embedding`: `axiom_memory_ann_by_context` (four prefix columns, the recovery path) and `axiom_memory_ann_by_tenant` (broad recall). `vector_cosine_ops` written explicitly, because omitting the opclass silently gives L2 and a `<=>` query then full-scans. Index use asserted from `EXPLAIN`, not assumed. |
-| **Cloud Managed MCP Server** | **Built; Cloud transport not yet exercised** | `axiom/audit_mcp.py` speaks to the Managed MCP Server over streamable HTTP with a scoped read-only service-account key, discovering tool argument names from `tools/list` rather than guessing them. It also has a LOCAL mode over a plain read-only connection, which **is** verified: `python -m axiom.audit_mcp "was any order ever refunded twice?"` returns *"No. Zero orders appear more than once in the provider ledger"* with the generated SQL shown. The Cloud MCP path remains unexercised: it needs a Cloud **service-account API key**, which is a different credential from the `ccloud` browser login used for everything else here, and one has not been minted yet. Containment is three independent layers: the `axiom_audit` role (`db/002_audit_role.sql`) has `SELECT` and nothing else, a statement guard rejects anything that is not a single `SELECT`/`WITH`, and the login is `default_transaction_read_only`. |
+| **Cloud Managed MCP Server** | **In use, verified against the live server** | `axiom/audit_mcp.py` speaks to the Managed MCP Server at `https://cockroachlabs.cloud/mcp` over streamable HTTP with a scoped service-account API key and the `mcp-cluster-id` header, discovering each tool's argument names from `tools/list` rather than guessing them. Verified end to end: `python -m axiom.audit_mcp --mode mcp "was any order ever refunded twice?"` returns *"Yes — 2 order(s) have more than one refund row: CE-BASELINE-… x4"* — correctly catching the **baseline** agent's double refunds while every AXIOM order has none. Containment is three independent layers: the `axiom_audit` role (`db/002_audit_role.sql`) has `SELECT` and nothing else, a statement guard rejects anything that is not a single `SELECT`/`WITH`, and the login is `default_transaction_read_only`. A LOCAL mode over a plain read-only connection answers the identical questions when no key is present. |
 | **ccloud CLI** | **In use, verified** | The cluster the measured results ran on (`axiom-memory`, BASIC, AWS `us-east-1`, v26.2.5) is administered entirely through `ccloud`: `auth login`, `cluster list`, `cluster user create axiom_app`, `cluster connection-string`. `scripts/provision_ccloud.sh` wraps provisioning + all three migrations, and the Cloud path in Setup is the CLI transcript that actually worked. |
 | **Agent Skills Repo** | **Not yet used** | Design intent: contribute a crash-safe-queue skill capturing the partial-index / fencing-token / never-DELETE pattern. |
 
@@ -538,12 +538,13 @@ marketing document.
   passing regression tests. Neither was on the refund happy path, which is the lesson: the
   chaos demo never saw the first one because `auto_approve()` answers within 250 ms.
   Whatever branch your demo skips is where your bugs are.
-- **The Cloud Managed MCP transport is unexercised.** The audit agent's LOCAL mode is
-  verified; its Cloud MCP mode has never made a real connection. It needs a Cloud
-  service-account API key, which is a different credential from the `ccloud` browser login
-  used to provision and migrate the cluster, and one has not been minted. The code discovers tool arguments at connect time rather than
-  hard-coding them, which is the right design, but untested against the real endpoint is
-  untested.
+- **The MCP client was written before it could be tested, and it showed.** Three defects
+  only appeared on the first live connection: the server rejects a `cluster_id` argument
+  when the `mcp-cluster-id` header is set, its rows arrive one envelope deeper than
+  expected (a text block containing `{"rows": [...]}`), and the catalog's keyword router
+  scored substrings so "effects" outranked "unsettled" and answered a question nobody
+  asked. All three are fixed; none was findable against a mock. There is still no
+  automated test over the MCP path — it needs a live cluster and a key.
 - **The LLM is a small part of this system, deliberately.** Triage proposes an action. It
   never mints a key, never decides whether it may act, and never sees the receipt table. If
   you are looking for prompt engineering, it is not here.

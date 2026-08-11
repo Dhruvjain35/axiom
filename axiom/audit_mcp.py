@@ -231,17 +231,34 @@ CATALOG: tuple[NamedQuery, ...] = (
     NamedQuery(
         key='ledger_vs_belief',
         question="Does the agent's record agree with the provider's ledger?",
+        # DIRECTION MATTERS, and collapsing it to one count was actively misleading.
+        #
+        # The first version reported "6 rows disagree", which reads as AXIOM being
+        # broken. Every one of those six was a provider_refund with no AXIOM receipt —
+        # money moved by scripts/counterexample.py's transcript agent, which bypasses
+        # AXIOM on purpose. Meanwhile the direction that would actually indict the
+        # system, a receipt with no ledger row, was zero, and the number buried it.
+        #
+        #   ORPHANED_RECEIPT  AXIOM believes it acted, the provider has no record  ALARM
+        #   AMOUNT_MISMATCH   both have it, for different money                    ALARM
+        #   FOREIGN_REFUND    money moved by something that is not AXIOM           context
         sql="""
-            SELECT a.provider_ref,
+            SELECT coalesce(a.provider_ref, r.provider_ref) AS provider_ref,
                    a.amount_cents AS axiom_cents,
                    r.amount_cents AS provider_cents,
                    a.attempt_state,
-                   r.replay_count
+                   r.replay_count,
+                   r.order_ref,
+                   CASE
+                     WHEN r.provider_ref IS NULL              THEN 'ORPHANED_RECEIPT'
+                     WHEN a.provider_ref IS NULL              THEN 'FOREIGN_REFUND'
+                     ELSE                                          'AMOUNT_MISMATCH'
+                   END AS disagreement
             FROM axiom.public.axiom_action_attempt a
             FULL OUTER JOIN provider.public.provider_refund r
               ON r.provider_ref = a.provider_ref
-            WHERE a.provider_ref IS NULL
-               OR r.provider_ref IS NULL
+            WHERE (a.provider_ref IS NULL AND r.provider_ref IS NOT NULL)
+               OR (r.provider_ref IS NULL AND a.provider_ref IS NOT NULL)
                OR a.amount_cents != r.amount_cents
         """,
         keywords=('agree', 'disagree', 'mismatch', 'ledger', 'reconciliation',
@@ -258,13 +275,27 @@ def match_query(question: str) -> NamedQuery | None:
 
     Deliberately not a model call. This is the path that runs when there is no
     model, so making it depend on one would defeat it.
+
+    Two details that a naive `k in q` gets wrong, both found by asking real questions:
+
+    1. **Word boundaries.** Substring matching let "effects" satisfy BOTH the `effect`
+       and `effects` keywords, scoring 2 for one word, so
+       *"what external effects are still unsettled?"* routed to effects-licensed and
+       answered "18 effects were licensed by that memory" — about a memory the question
+       never mentioned. Confidently wrong prose from an audit tool is worse than no
+       answer.
+    2. **Specificity breaks ties.** On an equal count the longer matched keyword wins,
+       because a rarer word carries more intent: "unsettled" beats "effects".
     """
     q = question.lower()
-    best, best_score = None, 0
+    best, best_score, best_specificity = None, 0, 0
     for nq in CATALOG:
-        score = sum(1 for k in nq.keywords if k in q)
-        if score > best_score:
-            best, best_score = nq, score
+        hits = [k for k in nq.keywords
+                if re.search(rf'\b{re.escape(k)}\b', q)]
+        score = len(hits)
+        specificity = max((len(k) for k in hits), default=0)
+        if (score, specificity) > (best_score, best_specificity):
+            best, best_score, best_specificity = nq, score, specificity
     return best if best_score else None
 
 
@@ -493,7 +524,15 @@ class McpBackend:
         if tool not in self._tools:
             raise McpError(f'server does not expose a {tool!r} tool; it has '
                            f'{sorted(self._tools)}')
-        if self.cluster_id:
+        # The cluster is scoped EITHER by the mcp-cluster-id header OR by a per-call
+        # argument — never both. Sending both is a hard error from the real server:
+        #
+        #   MCP error 0: cluster_id is set in your MCP config; omit the cluster_id argument
+        #
+        # and select_query's own inputSchema says so: "Required when the MCP config has no
+        # cluster_id; otherwise must be omitted." This only surfaces against the live
+        # endpoint, which is why it survived until the first real connection.
+        if self.cluster_id and 'mcp-cluster-id' not in self._headers():
             cid = self._arg_name(tool, ('cluster_id',))
             if cid and cid not in args:
                 args[cid] = self.cluster_id
@@ -504,28 +543,47 @@ class McpBackend:
 
     @staticmethod
     def _rows(payload: Any) -> list[dict]:
-        """Normalize an MCP tool result into rows.
+        """Normalize any MCP tool result into a flat list of row dicts.
 
-        Servers return either structured JSON or a list of text blocks holding
-        JSON; both shapes are handled rather than assumed.
+        There is no single shape to match, so this descends until it finds rows:
+
+          * a bare list of row dicts
+          * an ENVELOPE, {"rows": [...]} — what CockroachDB Cloud actually returns
+          * MCP content blocks, [{"type": "text", "text": "<json>"}], whose decoded
+            JSON is itself usually an envelope
+          * and combinations of those, which is the case that really occurs
+
+        That last case is why this recurses instead of matching two shapes. The first
+        live connection returned a text block CONTAINING an envelope: the JSON decoded
+        cleanly, so nothing raised, and the envelope was appended as a single "row" whose
+        only key was `rows`. Every caller then died on a KeyError for the column it had
+        asked for, one stack frame away from the actual mistake. A mock reproduces none
+        of this, which is the argument for connecting to the real server early.
+
+        Known limitation, stated rather than hidden: a genuine result row with a column
+        literally named `rows`, `results` or `data` holding a list would be unwrapped as
+        an envelope. No query in CATALOG returns such a column, and the alternative —
+        trusting one fixed shape — is precisely what broke.
         """
-        if isinstance(payload, dict):
-            for k in ('rows', 'results', 'data'):
-                if isinstance(payload.get(k), list):
-                    return payload[k]
-            return [payload]
-        out: list[dict] = []
-        for block in payload if isinstance(payload, list) else []:
-            if isinstance(block, dict) and block.get('type') == 'text':
-                try:
-                    parsed = json.loads(block.get('text', ''))
-                except json.JSONDecodeError:
-                    out.append({'text': block.get('text', '')})
-                    continue
-                out.extend(parsed if isinstance(parsed, list) else [parsed])
-            elif isinstance(block, dict):
-                out.append(block)
-        return out
+        def descend(obj: Any) -> list[dict]:
+            if isinstance(obj, dict):
+                if obj.get('type') == 'text':
+                    try:
+                        return descend(json.loads(obj.get('text', '')))
+                    except json.JSONDecodeError:
+                        return [{'text': obj.get('text', '')}]
+                for k in ('rows', 'results', 'data'):
+                    if isinstance(obj.get(k), list):
+                        return descend(obj[k])
+                return [obj]
+            if isinstance(obj, list):
+                out: list[dict] = []
+                for el in obj:
+                    out.extend(descend(el))
+                return out
+            return []
+
+        return descend(payload)
 
     def list_tables(self) -> list[dict]:
         arg = self._arg_name('list_tables', ('database', 'database_name', 'db'))
@@ -762,10 +820,34 @@ class AuditAgent:
                       'Nothing is in flight — every authorized effect has a recorded '
                       'outcome.')
         else:
-            answer = (f'{n} row(s) disagree between the agent\'s receipts and the '
-                      f'provider ledger.' if n else
-                      'The agent\'s receipts and the provider ledger agree on every '
-                      'row.')
+            # Report by DIRECTION. A bare count conflated "AXIOM lost track of money it
+            # moved" with "money moved that AXIOM never authorized", and those are not
+            # the same finding — the first indicts the system, the second describes its
+            # surroundings. In this database the second is the counterexample's baseline
+            # agent, which double-refunds on purpose.
+            kinds: dict[str, int] = {}
+            for r in result.rows:
+                k = r.get('disagreement', 'UNKNOWN')
+                kinds[k] = kinds.get(k, 0) + 1
+            orphaned = kinds.get('ORPHANED_RECEIPT', 0)
+            mismatched = kinds.get('AMOUNT_MISMATCH', 0)
+            foreign = kinds.get('FOREIGN_REFUND', 0)
+
+            if orphaned or mismatched:
+                answer = (
+                    f'RECONCILIATION FAILURE: {orphaned} receipt(s) have no matching '
+                    f'refund in the provider ledger and {mismatched} differ on amount. '
+                    f'Every one is money AXIOM believes it moved and the provider has '
+                    f'no record of.')
+            elif foreign:
+                answer = (
+                    f'Every refund AXIOM issued appears in the provider ledger for the '
+                    f'same amount. {foreign} ledger row(s) have no AXIOM receipt — money '
+                    f'moved by something that is not AXIOM (in this database, the '
+                    f'transcript-memory agent in scripts/counterexample.py).')
+            else:
+                answer = ('The agent\'s receipts and the provider ledger agree on every '
+                          'row.')
 
         return AuditAnswer(question, answer, self.backend.mode, 'catalog',
                            queries=[result])

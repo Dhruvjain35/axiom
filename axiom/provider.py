@@ -30,7 +30,7 @@ import random
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 import psycopg
 from psycopg.rows import dict_row
@@ -226,38 +226,53 @@ def ledger(order_ref: str | None = None, limit: int = 200) -> list[dict]:
             return cur.fetchall()
 
 
-def duplicate_check() -> list[dict]:
+def duplicate_check(order_refs: Sequence[str] | None = None) -> list[dict]:
     """Any order refunded more than once. The demo's headline query.
 
     An empty result is the claim: N crashes, M re-sends, zero duplicate effects.
+
+    `order_refs` scopes the check to one run's orders. That is not cosmetic: the ledger
+    is append-only and shared, and `scripts/counterexample.py` deliberately double-refunds
+    a baseline order to prove a point. Left unscoped, those intentional duplicates make
+    every later chaos-demo run report a failure it did not cause.
     """
     with pool().connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT order_ref, count(*) AS refund_count, sum(amount_cents) AS total_cents
-                FROM provider_refund GROUP BY order_ref HAVING count(*) > 1
-                ORDER BY refund_count DESC
-            """)
+            if order_refs:
+                cur.execute("""
+                    SELECT order_ref, count(*) AS refund_count, sum(amount_cents) AS total_cents
+                    FROM provider_refund WHERE order_ref = ANY(%s)
+                    GROUP BY order_ref HAVING count(*) > 1
+                    ORDER BY refund_count DESC
+                """, (list(order_refs),))
+            else:
+                cur.execute("""
+                    SELECT order_ref, count(*) AS refund_count, sum(amount_cents) AS total_cents
+                    FROM provider_refund GROUP BY order_ref HAVING count(*) > 1
+                    ORDER BY refund_count DESC
+                """)
             return cur.fetchall()
 
 
-def stats() -> dict:
+def stats(order_refs: Sequence[str] | None = None) -> dict:
+    """Ledger totals. `order_refs` scopes them to one run — see duplicate_check()."""
+    where = 'WHERE order_ref = ANY(%s)' if order_refs else ''
+    args = (list(order_refs),) if order_refs else ()
     with pool().connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT count(*) AS refunds,
                        coalesce(sum(amount_cents), 0) AS total_cents,
                        coalesce(sum(replay_count), 0) AS replays
-                FROM provider_refund
-            """)
+                FROM provider_refund {where}
+            """, args)
             row = dict(cur.fetchone())
-            cur.execute("""
-                SELECT verdict, count(*) AS n FROM provider_request_log GROUP BY verdict
-            """)
+            cur.execute(f"""
+                SELECT verdict, count(*) AS n FROM provider_request_log {where}
+                GROUP BY verdict
+            """, args)
             row['verdicts'] = {r['verdict']: r['n'] for r in cur.fetchall()}
-            cur.execute("SELECT count(*) AS n FROM (SELECT order_ref FROM provider_refund "
-                        "GROUP BY order_ref HAVING count(*) > 1)")
-            row['duplicate_orders'] = cur.fetchone()['n']
+            row['duplicate_orders'] = len(duplicate_check(order_refs))
             return row
 
 
