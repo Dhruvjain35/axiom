@@ -5,7 +5,9 @@
 > **Status in one line:** AXIOM is BUILT, TESTED and PROVEN **on CockroachDB Cloud** —
 > 30/30 tasks through 30 SIGKILLs with zero duplicate refunds, 49/49 tests passing, 16/16
 > preflight gates, and the core claim verified on a real distributed cluster.
-> What remains is **deploying to AWS, wiring the Managed MCP transport, and the video** (§7).
+> **All four required CockroachDB tools are now in use and verified** (§14).
+> What remains is **deploying to AWS and recording the video** (§7) — and AWS is blocked
+> on the operator naming an account (§11.3).
 > Public repo: **https://github.com/Dhruvjain35/axiom**
 >
 > Jump to: §5 what exists · §5.3 the claim, proven · §5.4 the demo numbers ·
@@ -981,3 +983,85 @@ and Limitations), `docs/SUBMISSION.md`, `docs/CRASH_WINDOWS.md`.
 - ⚠️ **Cluster is single-region BASIC.** No `REGIONAL BY ROW`, no survival goal, so nothing
   here demonstrates surviving region loss. Highest-ceiling remaining idea (§9.7), and the
   first thing to cut if the schedule slips.
+
+
+---
+
+## 14. Session log — 2026-08-11 (later): MCP verified, and the counterexample
+
+**4/4 CockroachDB tools are now genuinely used and verified**, not aspirational:
+Distributed Vector Indexing, ccloud CLI, **Managed MCP Server**, and the Agent Skills repo
+remains the one design-intent item (§9.6).
+
+### The Managed MCP Server works
+
+`python -m axiom.audit_mcp --mode mcp "was any order ever refunded twice?"` really talks to
+`https://cockroachlabs.cloud/mcp`. Credentials: a **service account** (`axiom-audit-mcp`,
+Cluster Operator) and its **API key** — note this is a *different credential* from the
+`ccloud` browser login, which is the distinction that was not obvious and cost time.
+Key lives in this session's scratchpad as `.ccapikey`, never in the repo.
+
+**Rotate that key after the hackathon** — it was pasted into a chat transcript.
+
+Three defects surfaced on the FIRST live connection and none was findable against a mock:
+
+1. **Cluster scoping is either/or.** With the `mcp-cluster-id` header set, sending a
+   `cluster_id` argument is a hard error — `select_query`'s own `inputSchema` says
+   *"Required when the MCP config has no cluster_id; otherwise must be omitted."*
+2. **Rows arrive one envelope deeper than assumed:** a text block whose JSON is
+   `{"rows": [...]}`. The JSON decoded cleanly, so nothing raised — the envelope was
+   appended as a single "row" whose only key was `rows`, and every caller died on a
+   `KeyError` one stack frame from the actual mistake. `_rows()` now descends recursively.
+3. **The keyword router substring-matched.** "effects" satisfied both `effect` and
+   `effects`, outscoring the more specific "unsettled", so *"what external effects are
+   still unsettled?"* answered *"18 effects were licensed by that memory"* — about a memory
+   the question never mentioned. Now word-boundary matched with specificity tie-breaks.
+
+Also fixed: reconciliation reported **"6 rows disagree"**, which reads as AXIOM being
+broken. All six were provider refunds with **no AXIOM receipt** — money moved by the
+counterexample's transcript agent, which bypasses AXIOM on purpose — while the direction
+that would genuinely indict the system (a receipt with no ledger row) was **zero** and the
+single count buried it. It now reports by direction: `ORPHANED_RECEIPT` and
+`AMOUNT_MISMATCH` alarm, `FOREIGN_REFUND` is context.
+
+⚠️ **There is still no automated test over the MCP path.** It needs a live cluster and a
+key, so it cannot run in CI as things stand. Everything above was verified by hand.
+
+### The counterexample (§9.3) is built
+
+`axiom/baseline.py` + `scripts/counterexample.py`. Same order, same crash instant (W4),
+same provider, measured on Cloud:
+
+```
+                      TRANSCRIPT MEMORY                   AXIOM
+policy gate           none — refunds $300 unattended      sent to a human first
+REFUNDS CREATED       2                                   1
+DOLLARS OUT           $600.00                             $300.00
+```
+
+The baseline is deliberately **not** a strawman: fsync'd durable transcript, re-read on
+restart, checks for prior completion, records intent before acting. It still pays twice
+because after the crash it cannot distinguish "the call never went out" from "the call went
+out and I died", and has no durable receipt to recover the original key from.
+
+Two traps this created, both fixed, both worth knowing:
+
+- **The provider ledger is append-only and SHARED.** The first counterexample run left rows
+  behind and the second reported **4** refunds instead of 2 — a rigged-looking comparison
+  from a real mechanism. Order refs are now per-run.
+- **The counterexample's deliberate duplicates were about to fail every later chaos-demo
+  run.** `provider.stats()` / `duplicate_check()` were global. They now take an order-ref
+  scope, and `chaos_demo.py` passes its own mission's refs.
+
+### State at the end of this session
+
+```
+CockroachDB Cloud v26.2.5   preflight 16/16 · pytest 49 · chaos 30/30, 0 duplicates
+Managed MCP                 verified live, 7/7 catalog questions route correctly
+counterexample              PASS — baseline 2 refunds, AXIOM 1
+repo                        https://github.com/Dhruvjain35/axiom (public, 6 commits)
+```
+
+**Blocked and needs the operator:** an AWS account to deploy into. `solace-dev`
+(`704229156617`) is explicitly ruled out. Nothing is deployed; there is no demo URL, and
+that URL has to answer through Sep 15.
