@@ -7,7 +7,7 @@ built but not yet exercised, or written but not yet deployed, and they are marke
 Submitting them as finished would overstate the project — a bad trade for an entry whose
 whole argument is that systems should tell the truth about what they have done.
 
-*Status as of 2026-08-11: the engine, the test suite (47 passing + 2 strict `xfail`s pinning
+*Status as of 2026-08-11: the engine, the test suite (49 passing, including regression tests over two defects it found and that are now fixed
 known defects, all seven crash windows covered),
 the chaos demo, the HTTP API, the audit agent and Mission Control exist and run. Nothing is
 deployed, nothing has run against a distributed cluster, and there is no public demo URL or
@@ -133,8 +133,8 @@ to both. That is what makes the fused recovery transaction real rather than aspi
 **Seven crash windows, seven tests.** `tests/test_crash_windows.py` does not assert that
 AXIOM works; it assembles the exact conditions under which the design would corrupt state — an
 expired lease mid-refund, two executors racing one fence, a recovered agent that
-re-synthesized a different request body — and asserts that the system refuses. 47 of 49 tests
-pass; the other 2 are strict `xfail`s holding known defects in place rather than hiding them.
+re-synthesized a different request body — and asserts that the system refuses. All 49 pass. Two of them began life as strict `xfail`s pinning real defects the suite
+found; both defects are fixed and those tests now guard the fix.
 
 **The demo is also a test.** `scripts/chaos_demo.py` runs a real mission while `SIGKILL`ing a
 random live worker every 1.8 seconds — no signal handler, no `finally`, no polite lease
@@ -207,7 +207,7 @@ doubt the design, and the correct move was to go and find out.
 
 Ordered by value, honestly.
 
-1. **Put the test suite in CI.** All seven windows have a regression test and 47 of 49 tests
+1. **Put the test suite in CI.** All seven windows have a regression test and all 49 tests
    pass, but they pass when a human runs them. Until they run on every commit, "cannot
    regress" is not earned. Cheapest remaining credibility win on the project.
 2. **Run everything against a distributed CockroachDB Cloud cluster** and re-quote the

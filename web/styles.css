@@ -405,13 +405,15 @@ table { border-collapse: collapse; width: 100%; }
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
-  /* Rows may breathe into spare height but are capped, so a 30-task mission does not
-   * inflate into six enormous tiles while a 300-task one stays dense. */
-  grid-auto-rows: minmax(56px, 74px);
+  /* Rows absorb spare height instead of leaving a dead slab under the grid — a 30-task
+   * mission fills its panel, and a 300-task one still packs to the 56px floor and
+   * scrolls. The demo is recorded on a 30-task mission, so the small case is the one
+   * that has to look composed. */
+  grid-auto-rows: minmax(56px, 1fr);
   gap: 1px;
   padding: 1px;
   background: var(--rule);          /* the gap IS the hairline grid */
-  align-content: start;
+  align-content: stretch;
 }
 .cell {
   position: relative;

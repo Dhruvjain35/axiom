@@ -545,25 +545,84 @@ def unsettled(tenant_id: uuid.UUID = Depends(_tenant)) -> list[dict]:
 
 # ========================================================================= PROVIDER
 
+def _mission_order_refs() -> set[str] | None:
+    """The order refs belonging to the newest mission, or None if there is no mission.
+
+    The provider has no notion of our tenants — correctly, since it is a different
+    company's system in the story and a different database in fact. So scoping has to
+    happen HERE, by asking AXIOM which orders this mission touched and filtering the
+    external ledger to those.
+    """
+    def _q(cur):
+        cur.execute("""
+            SELECT payload->>'order_ref' AS order_ref
+            FROM axiom_task
+            WHERE tenant_id = %s AND mission_id = (
+                SELECT id FROM axiom_mission WHERE tenant_id = %s
+                ORDER BY created_at DESC LIMIT 1)
+        """, (str(seed.DEMO_TENANT), str(seed.DEMO_TENANT)))
+        return {r['order_ref'] for r in cur.fetchall() if r['order_ref']}
+    refs = db.tx(_q, readonly=True)
+    return refs or None
+
+
 @app.get('/api/provider/ledger')
 @json_route
-def provider_ledger(limit: int = Query(200, ge=1, le=1000)) -> list[dict]:
+def provider_ledger(limit: int = Query(200, ge=1, le=1000),
+                    scope: str = Query('mission', pattern='^(mission|global)$')) -> list[dict]:
     """The EXTERNAL world's record. Different database, different connection, no shared
     transaction — which is exactly the relationship a real payments API has with your
-    application, minus the network. This is the ledger the demo audits against."""
-    return provider.ledger(limit=limit)
+    application, minus the network. This is the ledger the demo audits against.
+
+    `scope=mission` (the default) filters to the orders the current mission touched.
+    The provider database is genuinely global — it accumulates every refund any run ever
+    issued — so an unscoped ledger next to a single mission's task grid can visibly
+    disagree with it on camera, which is the last thing you want in the one panel whose
+    job is to be trusted. `scope=global` returns the raw external record.
+    """
+    rows = provider.ledger(limit=limit)
+    if scope == 'global':
+        return rows
+    refs = _mission_order_refs()
+    return rows if refs is None else [r for r in rows if r['order_ref'] in refs]
 
 
 @app.get('/api/provider/stats')
 @json_route
-def provider_stats() -> dict:
+def provider_stats(scope: str = Query('mission', pattern='^(mission|global)$')) -> dict:
     """`duplicate_orders` is the headline number and it must be zero.
 
     `replays` above zero is the other half of the claim: it proves the crashes landed
     inside the dangerous window and that recovery genuinely re-sent under the same
     derived key, rather than the run simply having been lucky.
+
+    Scoped to the current mission by default, for the reason given on the ledger route.
+    Note that `duplicate_orders` is recomputed over the scoped rows rather than filtered
+    from the global figure: a duplicate outside this mission is still a real duplicate,
+    but it is not THIS mission's claim, and conflating the two is how a headline number
+    stops meaning anything.
     """
-    return provider.stats()
+    if scope == 'global':
+        return provider.stats()
+
+    refs = _mission_order_refs()
+    rows = provider.ledger(limit=1000)
+    if refs is not None:
+        rows = [r for r in rows if r['order_ref'] in refs]
+
+    by_order: dict[str, int] = {}
+    for r in rows:
+        by_order[r['order_ref']] = by_order.get(r['order_ref'], 0) + 1
+
+    glob = provider.stats()
+    return {
+        'refunds': len(rows),
+        'total_cents': sum(int(r['amount_cents'] or 0) for r in rows),
+        'replays': sum(int(r['replay_count'] or 0) for r in rows),
+        'verdicts': glob['verdicts'],       # request-level, not order-level: not scopable
+        'duplicate_orders': sum(1 for n in by_order.values() if n > 1),
+        'scope': 'mission',
+    }
 
 
 # ==================================================================== CRASH WINDOWS

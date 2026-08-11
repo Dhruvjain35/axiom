@@ -2,10 +2,13 @@
 
 **Written 2026-08-10. Last updated 2026-08-10 (build session 2). Deadline 2026-08-18 17:00 EDT.**
 
-> **Status in one line:** the engine is BUILT and PROVEN — 30/30 tasks completed through
-> 12 SIGKILLs with zero duplicate refunds — and the core CockroachDB claim is verified.
-> Jump to §5 for exactly what exists, §5.4 for what was proven, §5.5 for the two real bugs
-> that running it (rather than reading it) uncovered.
+> **Status in one line:** AXIOM is BUILT, TESTED and PROVEN on a local cluster —
+> 30/30 tasks through 22 SIGKILLs with zero duplicate refunds, 49/49 tests passing, and
+> the core CockroachDB claim verified. What remains is not construction, it is
+> **moving to CockroachDB Cloud, deploying to AWS, and recording the video** (§7).
+>
+> Jump to: §5 what exists · §5.3 the claim, proven · §5.4 the demo numbers ·
+> §5.5 the four real bugs · §5.6 what the verifiers caught · §7 what is left · §12 session log.
 
 You are picking up a hackathon project mid-build. This document is the complete brief:
 what the competition wants, what we are building and why, what is actually on disk right
@@ -326,17 +329,42 @@ Note what both have in common: they are failures of the **approval** path, the o
 the happy-path demo never touched. That is exactly the class of bug the W1–W7 suite exists
 to catch.
 
-### 5.6 Verified status of the parallel workstreams
+### 5.6 Verified status of every workstream
 
-⚠️ Each of these was built by a subagent and then re-run by a separate adversarial
-verifier, because a build report is not evidence. Treat any row below marked PARTIAL as
-work in progress, and read that workstream's own notes before trusting it.
+⚠️ Each of these was built by a subagent and then **re-run by a separate adversarial
+verifier**, because a build report is not evidence. The verifiers were told to catch
+overclaiming, and they did — including in their own workstreams' documentation.
 
-*(This table is filled in at the end of the session — see the run summary appended in
-§12. If §12 is missing, the fan-out did not complete and you should verify each of
-`tests/`, `axiom/api.py`, `web/`, `deploy/`, and `README.md` yourself before relying on
-them.)*
+| Workstream | Files | Verdict | State |
+| --- | --- | --- | --- |
+| **Engine** | `axiom/*.py` (13 modules) | ✅ | Written and driven directly; chaos demo passes |
+| **Tests** | `tests/` (4 modules + conftest), `pytest.ini`, `scripts/verify_invariants.py` | ✅ SOLID | **49 tests, all 49 pass** |
+| **API + MCP** | `axiom/api.py` (19 endpoints), `axiom/audit_mcp.py`, `db/002_audit_role.sql` | ✅ SOLID | Every endpoint curled; MCP mode is the one unverified piece (§11.2) |
+| **Mission Control** | `web/index.html`, `app.js`, `styles.css` | ✅ SOLID | Loaded, screenshotted, **zero console errors** |
+| **Deploy** | `Dockerfile`, `docker-compose.yml`, `deploy/terraform/`, `deploy/ecs/`, `scripts/provision_ccloud.sh`, `deploy/COST.md` | ✅ SOLID | `docker build` + `docker compose up` + `terraform validate` all really run |
+| **Docs** | `README.md`, `docs/ARCHITECTURE.md`, `docs/CRASH_WINDOWS.md`, `docs/SUBMISSION.md` | ⚠️ PARTIAL → fixed | Verifier found the schema-apply order was **wrong** and fixed it (see below) |
 
+**What the verifiers caught that the builders missed** — this is the part worth reading:
+
+- **The documented setup was broken.** `README` said apply `001 → 002 → 003`; that fails
+  with `SQLSTATE 3D000` because `002_audit_role.sql` grants on objects `003` has not
+  created yet. Correct order is **`001 → 003 → 002`**. Re-verified end to end on a virgin
+  cluster. A judge following the README literally would have hit this in the first minute.
+- **`audit_mcp.py` would have died on camera.** Its `LIMIT` guard regex was end-anchored,
+  so any model-written SQL ending `LIMIT 20 OFFSET 40` got a *second* `LIMIT` appended →
+  syntax error. Harmless for the six curated queries, fatal on the Bedrock free-text path
+  that is the feature's whole point. Fixed.
+- **Every API error reached the operator as `409 Conflict`.** `web/app.js` read only
+  `j.error`, but bare `HTTPException`s emit only `{detail}` — so the 404/409/400/422 paths
+  all surfaced as useless toasts. Fixed and proven before/after in the browser.
+- **The provider ledger was global, not mission-scoped**, so on a recorded demo the
+  headline number and the ledger could visibly disagree. Fixed after the run: both provider
+  routes now take `scope=mission` (default) or `scope=global`.
+- **Test counts were wrong in all four docs**, and `CRASH_WINDOWS.md` contradicted itself
+  (line 15 said 43, line 462 said 42; the truth was 49). Fixed.
+- **The shared local cluster was being corrupted by parallel agents**, which is worth
+  knowing: "another AXIOM worker is alive on this cluster" makes suite numbers meaningless.
+  The suite has an exclusivity guard, but it only checks once at startup (§7).
 
 ## 6. The system
 
@@ -804,3 +832,75 @@ Nothing ships until every line is checked.
 Keep the marks accurate even when the answer is inconvenient. The entire project is an
 argument that systems should tell the truth about what they have and have not done; a
 handoff document that overstates its own status fails its own thesis.
+
+
+---
+
+## 12. Session log — 2026-08-10, build session 2
+
+What happened, in order, so the next person can tell effort from evidence.
+
+**Unblocked the environment.** The Cloud cluster password was unavailable, which had
+stalled everything. Started a **local single-node CockroachDB v26.2.3** from the vendored
+binary instead, and the whole project has been developed and proven against it since.
+Confirmed AWS works for real: Titan V2 returns 1024 dims, Claude models are available
+in-region.
+
+**Answered the open question.** Fixed a `sin(decimal)` bug in `preflight.py`, added two
+gates (bound-parameter search vector; `AS OF SYSTEM TIME` at top level), and ran it:
+**16/16 blocking gates pass**. Gate 6 proves the thesis — an uncommitted memory IS
+recallable by ANN inside its own transaction, with the vector index still in use.
+
+**Applied the schema.** 747 lines, clean on the first execution. 9 tables, 2 C-SPANN
+vector indexes, no column families on `axiom_task`.
+
+**Built the engine** (13 modules, ~3,000 lines): the five protocols, four memory classes,
+the append-only journal, versioned policy, a genuinely external provider in its own
+database, and a worker designed to be killed. Then `scripts/chaos_demo.py`, which SIGKILLs
+a random live worker every 1.8 s and audits the external ledger afterwards.
+
+**Fanned out the rest** across five parallel agents (tests, API + MCP, Mission Control,
+deploy, docs), then had a **separate adversarial verifier re-run each one** — see §5.6 for
+what that caught, including a README whose documented setup order did not work.
+
+**Found and fixed four real bugs.** Two while driving the engine (§5.5), two more that the
+invariant suite caught and pinned as strict `xfail`s before they were fixed:
+
+| # | Bug | Where it hid |
+| --- | --- | --- |
+| 1 | Parking for approval **raised** out of `db.tx()`, rolling back the approval row it had just written | approval branch |
+| 2 | Nothing consumed the single-use decision token, so an approved task re-parked forever | approval branch |
+| 3 | An unanswered approval never self-healed — nothing ever set `EXPIRED`, so the re-park hit `23505` and the `UniqueViolation` **killed the worker** | approval branch |
+| 4 | Attempt exhaustion **stranded** a task in `READY` forever: out of the claim index, never transitioned, receipt stuck on the unsettled worklist | retry branch |
+
+All four lived in branches the happy-path demo never touched. That is the single most
+transferable lesson of this session, and it is now trap #14 in §8.
+
+**Final verified state, all on the local cluster:**
+
+```
+preflight       16/16 blocking gates pass
+pytest          49 passed
+chaos demo      30/30 tasks terminal · 22 SIGKILLs · 4 idempotent replays
+                18 refunds · $2,042.04 moved · DUPLICATE REFUNDS 0
+Mission Control loads, zero console errors, screenshotted
+docker          build + compose up verified; terraform validate passes
+```
+
+**Two commits:** `856e4c2` (schema + engine + chaos demo) and `35eadf6` (tests, API, UI,
+deploy, docs, and the two engine fixes), plus this update.
+
+### What is NOT done — read this before claiming anything
+
+- ❌ **Nothing runs on CockroachDB Cloud.** Every number above is from a laptop
+  single-node. Do not label any of it "CockroachDB Cloud" in the submission.
+- ❌ **Nothing is deployed.** No ECS, no ALB, no demo URL. The artifacts are built and
+  validated; not one billable AWS resource has been created.
+- ❌ **The repo has no GitHub remote.** It is committed locally only.
+- ❌ **The Managed MCP transport has never made a real connection.** Only the local
+  read-only fallback is verified. It is a hackathon requirement, so budget time for it.
+- ❌ **No CI.** The suite passes when a human runs it, which is weaker than "cannot regress".
+- ❌ **No video.**
+- ⚠️ **The suite's exclusivity guard checks once at startup.** A worker that starts
+  mid-run silently steals its tasks and produces spurious failures. Loud and
+  self-explaining, but confusing at 3am — worth hardening.

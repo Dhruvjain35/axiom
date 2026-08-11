@@ -343,8 +343,7 @@ Verified: 6/6 tasks terminal, 4 refunds, 0 kills, in 2.9 seconds.
 ./.venv/bin/python -m pytest -q
 ```
 
-49 tests at the time of writing: **47 pass and 2 are `xfail`**. The two are not cosmetic —
-each is a strict-`xfail` regression test holding a real, open defect in place (an unanswered
+49 tests, **all 49 passing**. Both defects that the suite originally pinned as strict-`xfail` — an unanswered approval that never self-healed, and attempt exhaustion that stranded a task in `READY` — have since been fixed in `axiom/tasks.py`, and those tests now stand as ordinary regression tests.
 approval does not self-heal; attempt exhaustion strands a task instead of dead-lettering it).
 Both are described in Limitations. The suite does not assert that AXIOM works;
 it assembles the exact conditions under which the design would corrupt state — an expired
@@ -389,7 +388,7 @@ the point of the provider interfaces in `embeddings.py` and `llm.py`.
 | `axiom/seed.py` | Demo tenant, policy, mission, 30 exceptions, 10 prior memories. |
 | `axiom/api.py` | HTTP API over the engine. |
 | `axiom/audit_mcp.py` | The audit agent: natural-language questions answered in SQL against the live database, under a read-only identity. |
-| `tests/` | 49 tests — 47 passing, 2 strict-`xfail` pinning known defects (13 crash-window, 17 invariant, 5 recall-plan, 14 schema-sync). `test_crash_windows.py` covers W1–W7; `test_invariants.py` races the fence, the budget and the supersession chain; `test_recall_plan.py` asserts on query plans; `test_schema_sync.py` checks the enums against the live database. |
+| `tests/` | 49 tests, all passing (13 crash-window, 17 invariant, 5 recall-plan, 14 schema-sync). `test_crash_windows.py` covers W1–W7; `test_invariants.py` races the fence, the budget and the supersession chain; `test_recall_plan.py` asserts on query plans; `test_schema_sync.py` checks the enums against the live database. |
 | `web/` | Mission Control front end. |
 | `deploy/terraform/`, `Dockerfile` | Deployment infrastructure. Written, not applied — see Limitations. |
 | `scripts/chaos_demo.py` | The headline demo. |
@@ -445,18 +444,19 @@ marketing document.
 - **Nothing is deployed.** `Dockerfile` and `deploy/terraform/` are written but have never
   been applied. There is no ECS service, no ALB, and no public demo URL. The system runs from
   a shell.
-- **The test suite runs against a live cluster, not in CI.** 47 of 49 tests pass and all
+- **The test suite runs against a live cluster, not in CI.** All 49 tests pass and all
   seven crash windows have one, but there is no CI pipeline running them on every commit.
   "Passes when a human runs it" is weaker than "cannot regress".
-- **Two known open defects, each pinned by a strict `xfail` test rather than hidden.** (1) An
-  approval nobody answers does not self-heal: when `available_at` passes the task is
-  re-claimed, policy refuses again, and because nothing in the codebase ever sets
-  `ApprovalState.EXPIRED`, `request_approval()` hits `23505` on `axiom_approval_one_pending`
-  and kills the worker. The chaos demo never sees it because `auto_approve()` answers within
-  250 ms. (2) Attempt exhaustion strands a task in `READY` forever instead of dead-lettering
-  it, because no caller checks the attempt budget; unreachable today only because the
-  stand-in provider has no retryable-failure path. Neither is on the refund happy path, and
-  neither is fixed.
+- **Two defects the suite found, both since fixed — and worth stating because of where
+  they lived.** (1) An approval nobody answered never self-healed: nothing in the codebase
+  ever set `ApprovalState.EXPIRED`, so the re-park hit `23505` on
+  `axiom_approval_one_pending` and the `UniqueViolation` killed the worker. (2) Attempt
+  exhaustion stranded a task in `READY` forever — out of the claim index, but never
+  transitioned — leaving its receipt on the unsettled worklist and a mission reading
+  29/30 complete indefinitely. Both are fixed in `axiom/tasks.py` and both now have
+  passing regression tests. Neither was on the refund happy path, which is the lesson: the
+  chaos demo never saw the first one because `auto_approve()` answers within 250 ms.
+  Whatever branch your demo skips is where your bugs are.
 - **The Cloud Managed MCP transport is unexercised.** The audit agent's LOCAL mode is
   verified; its Cloud MCP mode has never made a real connection, because the service-account
   key is not available here. The code discovers tool arguments at connect time rather than
