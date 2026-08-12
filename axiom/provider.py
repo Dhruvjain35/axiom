@@ -61,9 +61,17 @@ def provider_url() -> str:
 def pool() -> ConnectionPool:
     global _pool
     if _pool is None:
-        _pool = ConnectionPool(provider_url(), min_size=1, max_size=6,
+        # max_size was 6, and six concurrent viewers exhausted it: every Mission Control
+        # poll hits /api/provider/stats, so a handful of judges browsing at once produced
+        # HTTP 503 on the one number the demo exists to show. The provider is a stand-in
+        # for a remote API, so its pool should be sized for read fan-out, not for the
+        # single worker that writes to it. min_size 2 keeps a warm connection so the first
+        # request after an idle gap does not pay TCP+TLS setup.
+        _pool = ConnectionPool(provider_url(), min_size=2, max_size=16,
+                               timeout=10.0, max_idle=300.0,
                                kwargs={'row_factory': dict_row,
-                                       'application_name': 'axiom-provider'},
+                                       'application_name': 'axiom-provider',
+                                       'connect_timeout': 10},
                                open=True)
     return _pool
 

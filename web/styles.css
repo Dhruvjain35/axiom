@@ -99,8 +99,10 @@ table { border-collapse: collapse; width: 100%; }
   height: 100%;
   display: grid;
   /* The mission row sizes to its content: with every task state occupied the count strip
-   * runs to three lines, and a fixed height clipped it. The body row takes what is left. */
-  grid-template-rows: var(--h-top) auto minmax(0, 1fr);
+   * runs to three lines, and a fixed height clipped it. The third row is the guided-proof
+   * strip, which is `hidden` and therefore zero-height until a run starts. The body row
+   * takes what is left. */
+  grid-template-rows: var(--h-top) auto auto minmax(0, 1fr);
 }
 
 /* ──────────────────────────────────────────────────────────────────── topbar ── */
@@ -829,3 +831,438 @@ pre.json {
   border-bottom: 1px solid #4a3016; padding-bottom: 1px;
 }
 .cell-meta .ep.is-callout b { font-weight: 400; color: var(--hot); margin: 0 2px; }
+
+/* ═══════════════════════════════════════════ the entry, explained to a stranger ══
+ *
+ * Everything below this line was added for one reason: a judge lands here knowing
+ * nothing and has ninety seconds. The console above is correct and dense and assumes you
+ * already know what AXIOM is. These are the surfaces that answer "what am I looking at",
+ * "what am I about to watch" and "which number is the proof" — under exactly the rules
+ * the header of this file already sets. No new fonts, no gradients, no glow, one alarm
+ * colour, structure from alignment.
+ */
+
+/* ─────────────────────────────────────────────────────── the two entry buttons ── */
+
+/* BRIEFING sits inside .brand so it reads as part of the identity block rather than as
+ * one more control in a row of four. Quiet, because it is the second thing you press. */
+.btn-brief {
+  margin-left: 4px;
+  border-color: var(--rule);
+  color: var(--faint);
+  font-size: 9px;
+}
+.btn-brief:hover { color: var(--text); border-color: var(--rule-3); }
+
+/* RUN THE PROOF is the one control a stranger should press, so it is the only button on
+ * the page carrying body-text colour and a full-contrast rule. It earns that by being
+ * separated from the manual group with a hairline rather than by being made bigger or
+ * rounder or a different hue. */
+.btn-proof {
+  color: var(--text);
+  border-color: var(--rule-3);
+  padding: 4px 13px;
+  letter-spacing: 0.16em;
+}
+.btn-proof:hover { border-color: var(--focus); background: #1b211e; }
+.btn-proof:disabled { opacity: 1; color: var(--faint); border-color: var(--rule); }
+.topright > .demo { border-left: 1px solid var(--rule-2); padding-left: 14px; margin-left: 2px; }
+
+/* ───────────────────────────────────────────── the verdict under the money shot ── */
+
+/* Reserved space so the strip does not reflow when the verdict changes length. */
+.money-verdict {
+  margin-top: 5px;
+  font-size: 9.5px; letter-spacing: 0.06em; line-height: 1.35;
+  color: var(--ghost);
+  border-top: 1px solid var(--rule);
+  padding-top: 4px;
+}
+/* "0 duplicates, but nothing was retried" is not an alarm and not a success. It is the
+ * honest middle, and it gets the neutral colour on purpose. */
+.money-verdict.is-unproven { color: var(--warn); }
+.money-verdict.is-proven   { color: var(--ok); letter-spacing: 0.08em; }
+.money-verdict.is-alarm    { color: var(--alarm); }
+
+/* ═══════════════════════════════════════════════════════════════ the guided proof ══ */
+
+.proof {
+  border-bottom: 1px solid var(--rule-2);
+  background: var(--panel-2);
+  padding: 8px 14px 9px;
+}
+
+/* The step rail is seven top rules, not seven boxes. A step is "done" when its rule goes
+ * green and "now" when its rule goes to body colour — position on a line, which is what
+ * progress actually is. */
+.pf-rail { display: flex; list-style: none; margin: 0 0 8px; padding: 0; gap: 0; }
+.pfs {
+  flex: 1 1 0; min-width: 0;
+  display: flex; align-items: baseline; gap: 6px;
+  border-top: 2px solid var(--rule-2);
+  padding: 5px 10px 0 0;
+  font-size: 9px; letter-spacing: 0.1em; color: var(--ghost);
+}
+.pfs b { font-weight: 400; color: var(--ghost); }
+.pfs span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pfs.is-done { border-top-color: #2f6e53; color: var(--faint); }
+.pfs.is-done b { color: #3f8867; }
+.pfs.is-now { border-top-color: var(--text); color: var(--text); }
+.pfs.is-now b { color: var(--text); }
+
+.pf-line {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  grid-template-areas: 'n step . ev stop' 'say say say say say';
+  gap: 3px 12px;
+  align-items: baseline;
+}
+.pf-n    { grid-area: n; font-size: 10px; color: var(--faint); }
+.pf-step { grid-area: step; font-family: var(--serif); font-size: 14.5px; color: var(--text); white-space: nowrap; }
+.pf-ev   { grid-area: ev; display: flex; gap: 16px; align-items: baseline; }
+#pf-stop { grid-area: stop; }
+
+/* Two lines, wrapping, full width. The narration is up to ~150 characters and ellipsising
+ * it on one line cut it exactly where the meaning was. */
+.pf-say {
+  grid-area: say;
+  font-size: 11px; line-height: 1.4; color: var(--dim);
+  max-height: 2.85em; overflow: hidden;
+}
+.pf-say.is-hot  { color: var(--hot); }
+.pf-say.is-miss { color: var(--warn); }
+
+.pev { display: inline-flex; align-items: baseline; gap: 6px; }
+.pev b { font-size: 15px; font-weight: 400; color: var(--text); }
+.pev span { font-size: 9px; letter-spacing: 0.1em; color: var(--faint); }
+.pev.is-alarm b, .pev.is-alarm span { color: var(--alarm); }
+
+/* ══════════════════════════════════════════════════════ the fence, made legible ══
+ *
+ * The proof of this whole system is one integer incrementing inside one 132px cell. That
+ * is true and it is unwatchable. The cell keeps its chip and its corner tick for the
+ * operator; this block restates the same fact at a size that survives a 720p screen
+ * recording. It appears — it does not glow, pulse or slide, because it is a readout.
+ */
+.fenceproof {
+  border: 1px solid #4a3016; border-left-width: 2px; border-left-color: var(--hot);
+  background: var(--hot-bg);
+  margin-bottom: 1px;
+}
+.fp-row {
+  display: grid; grid-template-columns: 132px minmax(0, 1fr);
+  gap: 0 14px; padding: 9px 12px 10px;
+  border-top: 1px solid #3a2611;
+}
+.fp-row:first-child { border-top: 0; }
+.fp-lbl {
+  font-size: 9.5px; letter-spacing: 0.14em; color: var(--hot);
+  padding-top: 5px;
+}
+.fp-big { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.fp-task { font-size: 15px; color: var(--text); }
+.fp-ep { font-size: 20px; color: var(--hot); line-height: 1.1; }
+.fp-ep b { font-weight: 400; }
+.fp-ep i { font-style: normal; color: #8a6236; margin: 0 5px; }
+.fp-mono { font-size: 12px; color: var(--text); word-break: break-all; }
+.fp-same {
+  font-size: 9px; letter-spacing: 0.16em; color: var(--hot);
+  border: 1px solid #5a3315; padding: 1px 5px; white-space: nowrap;
+}
+.fp-note { font-size: 10.5px; line-height: 1.45; color: #bfa588; margin-top: 3px; }
+.fp-note b { font-weight: 400; color: var(--hot); }
+
+/* ────────────────────────────────────────────────────────── ESCALATED, not DEAD ── */
+
+/* An escalation is not a failure: nothing was sent, no money moved, and a human now owns
+ * the case. It gets --hold, the colour this panel already spends on "a human owns it".
+ * A DASHED left rule rather than a solid one is what separates it from
+ * AWAITING_APPROVAL, so the two do not rely on being different shades of the same blue —
+ * one is blocked and live, the other is handed off and finished. */
+.mark.m-ESCALATED { background: transparent; box-shadow: inset 0 0 0 1.5px var(--hold); }
+.cell.s-ESCALATED { border-left-color: var(--hold); border-left-style: dashed; }
+.cell.s-ESCALATED .cell-state { color: var(--hold); }
+.cell.s-ESCALATED .cell-key { color: var(--dim); }
+
+/* ─────────────────────────────────────────────────────────────── worker outcomes ── */
+
+/* A worker that drained its queue and exited wrote stopped_at on the way out. That is a
+ * normal end, so it is grey. Red stays for the worker that stopped heartbeating without
+ * ever saying so, which is the exact condition the fencing token exists for. */
+.worker.is-exited .worker-ref { color: var(--faint); }
+.worker.is-exited .worker-age, .worker.is-exited .worker-status { color: var(--ghost); }
+.worker.is-exited .shardmap i.on { background: #232926; }
+.worker-more {
+  padding: 6px 0 1px; font-size: 9.5px; letter-spacing: 0.06em; color: var(--ghost);
+}
+/* /api/agents has no LIMIT, so this panel is the one that grows without bound. Cap its
+ * height so it can never squeeze UNSETTLED RECEIPTS and REWIND off the rail. */
+#panel-workers .panel-body { max-height: 232px; }
+
+/* ══════════════════════════════════════════════════════════ the memory classes ══ */
+
+.classes { padding: 11px 14px 12px; border-bottom: 1px solid var(--rule); flex: 0 0 auto; }
+.classes-head { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; }
+.classes-head h4 { font-size: 9.5px; letter-spacing: 0.14em; color: var(--dim); }
+.classes-head > span { font-size: 10px; color: var(--faint); text-align: right; }
+.classes-head em { color: var(--dim); font-style: italic; }
+
+.classes-grid {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px; margin-top: 8px;
+  background: var(--rule);            /* the gap is the hairline, as in the task grid */
+  border: 1px solid var(--rule);
+}
+.mc { background: var(--panel); padding: 7px 9px 8px; border-left: 2px solid var(--ghost); }
+.mc-n { font-size: 10.5px; color: var(--text); letter-spacing: 0.06em; display: block; }
+.mc-a { font-size: 9px; letter-spacing: 0.14em; display: block; margin-top: 1px; }
+.mc p { font-size: 10px; line-height: 1.4; color: var(--faint); margin-top: 5px; }
+/* Authority as three levels, coloured by what they can actually do: advisory memory is
+ * the neutral READY grey, procedural memory is the colour of a human decision, and
+ * execution state is the colour this panel already uses for "an effect is at stake". */
+.mc-advise    { border-left-color: var(--slate); }
+.mc-advise .mc-a { color: var(--slate); }
+.mc-auth      { border-left-color: var(--hold); }
+.mc-auth .mc-a { color: var(--hold); }
+.mc-constrain { border-left-color: var(--hot); }
+.mc-constrain .mc-a { color: var(--hot); }
+
+/* ═══════════════════════════════════════════════ the crash-window timeline ══ */
+
+.tl { padding: 15px 18px 14px; border-bottom: 1px solid var(--rule); max-width: 92ch; }
+.tl-r {
+  position: relative; padding: 3px 0 3px 24px;
+  font-size: 11px; color: var(--faint); line-height: 1.5;
+}
+.tl-r::before {
+  content: ''; position: absolute; left: 6px; top: 0; bottom: 0;
+  width: 1px; background: var(--rule-3);
+}
+.tl-r:first-child::before { top: 9px; }
+.tl-dot {
+  position: absolute; left: 3px; top: 8px; width: 7px; height: 7px;
+  background: var(--rule-3); border: 1px solid var(--rule-3);
+}
+.tl-op { color: var(--dim); }
+.tl-op b { font-weight: 400; color: var(--text); }
+.tl-op span { color: var(--faint); margin-left: 8px; }
+.tl-commit .tl-dot { background: var(--ok); border-color: var(--ok); }
+.tl-c {
+  font-size: 8.5px; letter-spacing: 0.16em; color: var(--ok);
+  border: 1px solid #1f4436; padding: 0 4px; margin: 0 8px 0 8px !important;
+}
+.tl-irrev { padding-top: 6px; padding-bottom: 6px; }
+.tl-irrev b { font-weight: 400; color: var(--text); }
+.tl-irrev .tl-dot { background: var(--alarm); border-color: var(--alarm); }
+.tl-mark {
+  font-size: 9px; letter-spacing: 0.16em; color: var(--alarm); margin-left: 12px;
+}
+.tl-w .tl-id {
+  font-family: var(--serif); font-size: 12px; color: var(--faint);
+  border: 1px solid var(--rule-2); padding: 0 5px; margin-right: 10px;
+}
+.tl-w-hot { color: var(--dim); }
+.tl-w-hot .tl-id { color: var(--hot); border-color: #4a3016; }
+.tl-w-hot em { color: var(--text); font-style: italic; }
+.tl-foot {
+  margin-top: 9px; padding-left: 24px;
+  font-size: 10px; color: var(--ghost);
+}
+
+/* The one window this browser session can witness first-hand — and only once BOTH a
+ * fence advance and a provider replay have been seen. */
+.cw-live { background: #12100c; }
+.cw-obs {
+  font-size: 9px; letter-spacing: 0.14em; color: var(--hot);
+  border: 1px solid #4a3016; padding: 1px 5px; white-space: nowrap; margin-left: auto;
+}
+.cw-top { align-items: baseline; }
+
+/* The replayed row IS the crash, in the provider's own book. */
+#ledger-tbl tr.is-replay td { background: #16120b; }
+#ledger-tbl tr.is-replay td:first-child { box-shadow: inset 2px 0 0 var(--hot); }
+
+/* ══════════════════════════════════════════════════════════ the counterexample ══ */
+
+.ce { padding: 16px 20px 30px; }
+.ce-lede {
+  font-family: var(--serif); font-size: 13px; line-height: 1.6;
+  color: var(--dim); max-width: 80ch;
+}
+.ce-lede em { color: var(--text); font-style: italic; }
+.ce-setup {
+  display: flex; gap: 12px; align-items: baseline;
+  margin: 14px 0 2px; font-size: 11px; color: var(--dim);
+}
+.ce-tbl { width: 100%; max-width: 108ch; font-size: 11.5px; }
+.ce-tbl th, .ce-tbl td {
+  text-align: left; padding: 6px 14px; vertical-align: baseline;
+  border-bottom: 1px solid var(--rule);
+}
+.ce-h {
+  font-weight: 400; font-family: var(--serif); font-size: 15px; color: var(--dim);
+  border-bottom: 1px solid var(--rule-2); padding-top: 10px;
+}
+.ce-h span {
+  display: block; font-family: var(--mono); font-size: 9px;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--ghost); margin-top: 1px;
+}
+.ce-h-b { color: var(--text); }
+/* One hairline down the middle. The comparison is carried by alignment, not by two
+ * boxes sitting next to each other. */
+.ce-h-b, .ce-b { border-left: 1px solid var(--rule-2); }
+.ce-k {
+  color: var(--faint); font-size: 9.5px; letter-spacing: 0.1em;
+  text-transform: uppercase; width: 22%;
+}
+.ce-a { color: var(--dim); width: 38%; }
+.ce-b { color: var(--text); width: 40%; }
+.ce-tbl tbody tr:hover td { background: var(--panel-2); }
+
+.ce-total td { padding-top: 9px; padding-bottom: 9px; font-size: 13px; }
+.ce-total .ce-k { color: var(--dim); font-size: 10px; }
+.ce-bad .ce-a { color: var(--alarm); }
+.ce-good .ce-b { color: var(--ok); }
+/* The only 22px numbers on the page after the money shot, and the only other place the
+ * alarm colour is spent: a real customer is $300 down in the left column. */
+.ce-money td { padding-top: 12px; padding-bottom: 12px; }
+.ce-money .ce-a, .ce-money .ce-b {
+  font-family: var(--serif); font-size: 24px; line-height: 1;
+  font-variant-numeric: tabular-nums lining-nums;
+}
+.ce-money .ce-a { color: var(--alarm); }
+.ce-money .ce-b { color: var(--text); }
+
+.ce-say {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1px; margin-top: 18px; max-width: 108ch;
+  background: var(--rule); border: 1px solid var(--rule);
+}
+.ce-q { background: var(--panel); padding: 9px 12px 11px; border-left: 2px solid var(--rule-3); }
+.ce-q-b { border-left-color: var(--hot); }
+.ce-q p { font-size: 11px; line-height: 1.5; color: var(--dim); margin-top: 5px; }
+.ce-q-b p { color: var(--text); }
+
+.ce-verdict {
+  font-family: var(--serif); font-size: 15px; color: var(--text);
+  margin: 18px 0 0; max-width: 80ch;
+}
+.ce-prov {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 18px 28px; margin-top: 20px; padding-top: 14px;
+  border-top: 1px solid var(--rule); max-width: 108ch;
+}
+.ce-prov p { font-size: 10.5px; line-height: 1.5; color: var(--faint); margin-top: 5px; max-width: 62ch; }
+.ce-prov pre.json { margin-top: 7px; }
+
+/* ══════════════════════════════════════════════════════════════════ the briefing ══
+ *
+ * It has to answer "what am I looking at" in the first three seconds and then get out of
+ * the way. Built out of the same parts as everything else — hairlines, one serif for the
+ * argument, mono for anything that is data — so that dismissing it feels like closing a
+ * panel of the instrument rather than closing an ad.
+ */
+.brief {
+  position: fixed; inset: 0; z-index: 80;
+  background: rgba(5, 7, 6, 0.88);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.brief-card {
+  width: min(980px, 100%); max-height: min(860px, 92vh);
+  display: flex; flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--rule-3);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .6);
+}
+.brief-top {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 20px;
+  padding: 16px 22px 15px; border-bottom: 1px solid var(--rule-2);
+}
+.brief-eyebrow { font-size: 9.5px; letter-spacing: 0.22em; color: var(--faint); }
+.brief-setup {
+  font-family: var(--serif); font-size: 16px; line-height: 1.4;
+  color: var(--dim); margin-top: 8px; max-width: 70ch;
+}
+.brief-q {
+  font-family: var(--serif); font-size: 31px; line-height: 1.15;
+  font-style: italic; color: var(--text); margin-top: 3px;
+}
+
+/* Multi-column rather than grid: the four sections have very different heights, and a
+ * two-track grid leaves a slab of dead space under whichever one is shorter. Columns
+ * balance the flow, and column-width (not column-count) means the card falls to one
+ * column on a narrow window without a second media query. */
+.brief-body {
+  overflow-y: auto; min-height: 0;
+  padding: 4px 22px 18px;
+  column-width: 380px; column-gap: 32px;
+}
+.bsec { padding: 14px 0 4px; break-inside: avoid; -webkit-column-break-inside: avoid; }
+.bsec > h3 {
+  font-size: 9.5px; letter-spacing: 0.16em; color: var(--faint);
+  border-bottom: 1px solid var(--rule); padding-bottom: 6px; margin-bottom: 9px;
+}
+.blead {
+  font-family: var(--serif); font-size: 13px; line-height: 1.6; color: var(--dim);
+}
+.blead em { color: var(--text); font-style: italic; }
+.blead b { font-weight: 400; }
+.bnote { font-size: 10.5px; line-height: 1.5; color: var(--faint); margin-top: 9px; }
+.bnote em { color: var(--dim); font-style: italic; }
+.hot { color: var(--hot); }
+
+.btbl { width: 100%; font-size: 10.5px; }
+.btbl td { padding: 4px 10px 4px 0; border-bottom: 1px solid var(--rule); vertical-align: baseline; }
+.btbl tr:last-child td { border-bottom: 0; }
+.bt-n { color: var(--text); white-space: nowrap; }
+.bt-a { font-size: 9px; letter-spacing: 0.14em; white-space: nowrap; }
+.a-adv  { color: var(--slate); }
+.a-auth { color: var(--hold); }
+.a-con  { color: var(--hot); }
+.btbl td:last-child { color: var(--faint); line-height: 1.45; }
+
+.bsteps { margin: 0; padding-left: 0; list-style: none; counter-reset: bs; }
+.bsteps li {
+  position: relative; padding: 5px 0 6px 26px;
+  font-size: 11px; line-height: 1.5; color: var(--faint);
+  border-bottom: 1px solid var(--rule);
+  counter-increment: bs;
+}
+.bsteps li:last-child { border-bottom: 0; }
+.bsteps li::before {
+  content: counter(bs);
+  position: absolute; left: 0; top: 5px;
+  font-family: var(--serif); font-size: 12px; color: var(--ghost);
+}
+.bsteps b { font-weight: 400; color: var(--text); }
+.bsteps em { color: var(--dim); font-style: italic; }
+
+.brief-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  padding: 12px 22px 13px; border-top: 1px solid var(--rule-2);
+  background: var(--panel-2);
+}
+.brief-acts { display: flex; gap: 8px; }
+.brief-hint { font-size: 10px; color: var(--ghost); }
+.brief-hint b { color: var(--faint); font-weight: 400; border: 1px solid var(--rule-2); padding: 0 4px; }
+
+/* ─────────────────────────────────────────────────────────────────── narrower ── */
+
+/* Six tabs do not fit alongside their index numbers until about 1400px, and a tab that
+ * has scrolled out of a hidden-scrollbar strip is a tab a judge will never find. Drop
+ * the numbers first; they are a shortcut hint, not information. */
+@media (max-width: 1400px) {
+  .tab-n { display: none; }
+  .tab { padding: 9px 12px 8px; }
+}
+@media (max-width: 1180px) {
+  .brief-q { font-size: 25px; }
+  .brief-setup { font-size: 14px; }
+  .pf-step { font-size: 13px; }
+  .fp-ep { font-size: 17px; }
+}
+
+/* A footnote under the AXIOM value, for the two rows where the number needs an
+ * explanation and leaving it unexplained would read as a discrepancy. */
+.ce-note { font-size: 9.5px; line-height: 1.45; color: var(--ghost); margin-top: 3px; max-width: 46ch; }

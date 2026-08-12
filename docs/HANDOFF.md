@@ -3,7 +3,7 @@
 **Written 2026-08-10. Last updated 2026-08-10 (build session 2). Deadline 2026-08-18 17:00 EDT.**
 
 > **Status in one line:** AXIOM is BUILT, TESTED and PROVEN **on CockroachDB Cloud** —
-> 30/30 tasks through 30 SIGKILLs with zero duplicate refunds, 49/49 tests passing, 16/16
+> 30/30 tasks through 30 SIGKILLs with zero duplicate refunds, 92/92 tests passing, 16/16
 > preflight gates, and the core claim verified on a real distributed cluster.
 > **All four required CockroachDB tools are in use and verified** (§14). **AWS Lambda is
 > deployed and working at $0** (§15) — but its public URL is blocked by AWS on an
@@ -342,7 +342,7 @@ overclaiming, and they did — including in their own workstreams' documentation
 | Workstream | Files | Verdict | State |
 | --- | --- | --- | --- |
 | **Engine** | `axiom/*.py` (13 modules) | ✅ | Written and driven directly; chaos demo passes |
-| **Tests** | `tests/` (4 modules + conftest), `pytest.ini`, `scripts/verify_invariants.py` | ✅ SOLID | **49 tests, all 49 pass** |
+| **Tests** | `tests/`, `pytest.ini`, `scripts/verify_invariants.py` | ✅ SOLID | **92 tests, all pass** (49 at the time of that audit) |
 | **API + MCP** | `axiom/api.py` (19 endpoints), `axiom/audit_mcp.py`, `db/002_audit_role.sql` | ✅ SOLID | Every endpoint curled; MCP mode is the one unverified piece (§11.2) |
 | **Mission Control** | `web/index.html`, `app.js`, `styles.css` | ✅ SOLID | Loaded, screenshotted, **zero console errors** |
 | **Deploy** | `Dockerfile`, `docker-compose.yml`, `deploy/terraform/`, `deploy/ecs/`, `scripts/provision_ccloud.sh`, `deploy/COST.md` | ✅ SOLID | `docker build` + `docker compose up` + `terraform validate` all really run |
@@ -884,7 +884,7 @@ transferable lesson of this session, and it is now trap #14 in §8.
 
 ```
 preflight       16/16 blocking gates pass
-pytest          49 passed
+pytest          92 passed   (49 at the time of this session)
 chaos demo      30/30 tasks terminal · 22 SIGKILLs · 4 idempotent replays
                 18 refunds · $2,042.04 moved · DUPLICATE REFUNDS 0
 Mission Control loads, zero console errors, screenshotted
@@ -898,8 +898,9 @@ deploy, docs, and the two engine fixes), plus this update.
 
 - ❌ **Nothing runs on CockroachDB Cloud.** Every number above is from a laptop
   single-node. Do not label any of it "CockroachDB Cloud" in the submission.
-- ❌ **Nothing is deployed.** No ECS, no ALB, no demo URL. The artifacts are built and
-  validated; not one billable AWS resource has been created.
+- ⚠️ **SUPERSEDED — see §15.** At the time of this session nothing was deployed. AXIOM is
+  now deployed to AWS Lambda (both functions verified working by direct invoke, $0 spent).
+  What remains is the public URL, which is blocked by AWS account activation, not by us.
 - ❌ **The repo has no GitHub remote.** It is committed locally only.
 - ❌ **The Managed MCP transport has never made a real connection.** Only the local
   read-only fallback is verified. It is a hackathon requirement, so budget time for it.
@@ -954,7 +955,7 @@ you cannot find it, do not hunt: mint a new one with
 
 ```
 preflight       16/16 blocking gates passed (1 advisory)
-pytest          49 passed in 222s
+pytest          49 passed in 222s   (the suite is 92 as of 2026-08-12)
 chaos demo      30/30 tasks terminal · 30 SIGKILLs · 42 restarts · 3 approvals answered
                 18 refunds · $2,042.04 · 6 idempotent replays · DUPLICATE REFUNDS 0
 ```
@@ -1064,8 +1065,9 @@ repo                        https://github.com/Dhruvjain35/axiom (public, 6 comm
 ```
 
 **Blocked and needs the operator:** an AWS account to deploy into. `solace-dev`
-(`704229156617`) is explicitly ruled out. Nothing is deployed; there is no demo URL, and
-that URL has to answer through Sep 15.
+(`704229156617`) is explicitly ruled out. **Superseded by §15:** the Lambda deployment now
+exists and works; only public ingress is blocked, and the demo URL still has to answer
+through Sep 15.
 
 
 ---

@@ -102,14 +102,17 @@ def run_axiom() -> dict:
         budget_cents=100_000, created_by='human:counterexample'))
 
     dedupe = f'order:{ORDER_AXIOM}:refund:{uuid.uuid4().hex[:6]}'
-    db.tx(lambda cur: tasks.enqueue(
+    task_id = db.tx(lambda cur: tasks.enqueue(
         cur, tenant_id=DEMO_TENANT, mission_id=mission_id, task_type='refund',
         dedupe_key=dedupe,
         payload={'order_ref': ORDER_AXIOM, 'amount_cents': AMOUNT,
                  'description': DESCRIPTION, 'exception_kind': 'duplicate_charge'}))
 
     # --- worker A: claim, PREPARE (receipt commits), dispatch, then die in W4 ---
-    claimed = db.tx(lambda cur: tasks.claim(cur, agent_id=agent_a))
+    # Claim OUR task by id. The unqualified claim loop returns whatever is at the head of
+    # the queue, so on a seeded database this script used to grab one of the 30 demo tasks
+    # and die on an AttributeError — on the exact database state a judge has.
+    claimed = db.tx(lambda cur: tasks.claim(cur, agent_id=agent_a, task_id=task_id))
     def _prepare(task, agent):
         return db.tx(lambda cur: tasks.prepare(
             cur, task=task, agent_id=agent, step_name='refund',
@@ -130,7 +133,7 @@ def run_axiom() -> dict:
             cur, tenant_id=DEMO_TENANT, approval_id=prepared.approval_id,
             approved=True, decided_by='ops@acme.example',
             note='counterexample: operator authorizes the $300 refund'))
-        claimed = db.tx(lambda cur: tasks.claim(cur, agent_id=agent_a))
+        claimed = db.tx(lambda cur: tasks.claim(cur, agent_id=agent_a, task_id=task_id))
         prepared = _prepare(claimed, agent_a)
 
     receipt = prepared.receipt
@@ -148,7 +151,7 @@ def run_axiom() -> dict:
     db.tx(lambda cur: cur.execute(
         "UPDATE axiom_task SET available_at = now() - INTERVAL '1 second' WHERE id = %s",
         (str(claimed.id),)))
-    recovered = db.tx(lambda cur: tasks.claim(cur, agent_id=agent_b))
+    recovered = db.tx(lambda cur: tasks.claim(cur, agent_id=agent_b, task_id=task_id))
 
     situation = f'duplicate_charge: {DESCRIPTION}'
     vec = embeddings.embed_list(situation)
@@ -172,6 +175,13 @@ def run_axiom() -> dict:
         memory_embedding=embeddings.embed_list(
             f'{situation} | recovered; provider replayed {result.provider_ref}'),
         memory_outcome=Outcome.RESOLVED))
+
+    # Retire both agents. A demo script that leaves phantom ALIVE workers behind makes
+    # the invariant suite refuse to run for the next 30 seconds ("another AXIOM worker is
+    # alive on this cluster"), which reads as a broken test suite rather than as this
+    # script's litter. Whatever registers a worker is responsible for unregistering it.
+    for a in (agent_a, agent_b):
+        db.tx(lambda cur, a=a: tasks.stop_agent(cur, agent_id=a))
 
     ledger = provider.ledger(order_ref=ORDER_AXIOM)
     return {

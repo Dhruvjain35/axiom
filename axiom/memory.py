@@ -234,8 +234,24 @@ def recall(
     if as_of_valid:
         # The only legitimate post-ANN filter: valid time is time-varying and a computed
         # column cannot call now(). This is why we over-fetched.
+        #
+        # This compared `valid_until > occurred_at` for most of the project's life, which
+        # is a NO-OP: axiom_memory_valid_ck already guarantees valid_until > valid_from,
+        # and occurred_at defaults alongside it, so the predicate was true for every row
+        # it was asked about. An expired memory — valid_until five days in the past — came
+        # back as ACTIONABLE and could license a refund. The comment above described the
+        # intent correctly and the code did not implement it, which is the worst version of
+        # this bug: three other artifacts (the schema comment, ARCHITECTURE.md, and the
+        # recall_overfetch setting that exists solely to survive this filter) all documented
+        # behaviour that never happened.
+        #
+        # now() comes from the DATABASE, not from Python. The workers, the API and the
+        # Lambda run on different clocks; validity is a property of the data, so it is
+        # judged against the clock that owns the data.
+        cur.execute('SELECT now() AS t')
+        now = cur.fetchone()['t']
         rows = [r for r in rows
-                if r['valid_until'] is None or r['valid_until'] > r['occurred_at']]
+                if r['valid_until'] is None or r['valid_until'] > now]
 
     return [_row_to_recalled(r) for r in rows[:k]]
 

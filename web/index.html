@@ -18,6 +18,10 @@
     <div class="brand">
       <span class="brand-mark">AXIOM</span>
       <span class="brand-sub">MISSION&nbsp;CONTROL</span>
+      <!-- The persistent way back into the explainer. A judge who dismissed it on load
+           must be able to get it back without clearing localStorage. -->
+      <button class="btn btn-brief" id="btn-brief"
+              title="What is this? (B)">BRIEFING</button>
     </div>
 
     <div class="health" id="health">
@@ -34,6 +38,10 @@
     </div>
 
     <div class="topright">
+      <!-- The one control a stranger should press. Everything to its right is the manual
+           equivalent, kept because an operator wants the pieces separately. -->
+      <button class="btn btn-proof" id="btn-proof"
+              title="Runs the whole argument end to end: seed, crash a worker mid-refund, wait out the lease, recover under the same idempotency key, then read the provider's ledger.">RUN THE PROOF</button>
       <div class="demo">
         <button class="btn" id="btn-seed" title="POST /api/demo/seed">SEED</button>
         <button class="btn" id="btn-run"
@@ -53,7 +61,7 @@
   <section class="mission">
     <div class="mission-id">
       <h1 class="mission-title" id="m-title">no mission</h1>
-      <p class="mission-goal" id="m-goal">waiting for /api/mission</p>
+      <p class="mission-goal" id="m-goal">press RUN THE PROOF, or SEED to set the board up by hand</p>
       <div class="mission-meta">
         <span class="kv"><b>STATE</b><span id="m-state">—</span></span>
         <span class="kv"><b>MISSION</b><span id="m-uuid" class="uuid">—</span></span>
@@ -78,6 +86,28 @@
         <span><b id="p-replays">—</b> idempotent replays</span>
         <span><b id="p-total">—</b> total refunded</span>
       </div>
+      <!-- Zero duplicates with zero replays is not a proof: nothing was ever retried.
+           This line says which of the two it currently is, out loud. -->
+      <div class="money-verdict" id="dup-verdict">—</div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────── proof run ── -->
+  <!-- The guided demo. Hidden until RUN THE PROOF is pressed; it narrates each step
+       against what the rest of the page is doing, and it never claims a beat it has not
+       actually observed in the API responses. -->
+  <section class="proof" id="proof" hidden>
+    <ol class="pf-rail" id="pf-rail"></ol>
+    <div class="pf-line">
+      <span class="pf-n" id="pf-n">1/7</span>
+      <span class="pf-step" id="pf-step">—</span>
+      <span class="pf-say" id="pf-say">—</span>
+      <span class="pf-ev">
+        <span class="pev" title="task.recovered events: a worker claimed a task and found a live receipt already on it"><b id="pf-fence">0</b><span>RECOVERIES</span></span>
+        <span class="pev"><b id="pf-replay">0</b><span>REPLAYS</span></span>
+        <span class="pev" id="pf-dupe-box"><b id="pf-dupe">0</b><span>DUPLICATES</span></span>
+      </span>
+      <button class="btn btn-xs" id="pf-stop">STOP</button>
     </div>
   </section>
 
@@ -93,6 +123,8 @@
           <span class="panel-note" id="workers-note">—</span>
         </div>
         <div class="panel-body" id="workers"></div>
+        <div class="panel-foot">EXITED drained its queue and said so. KILLED stopped
+          heartbeating without ever saying so — that is the case the fence exists for.</div>
       </section>
 
       <section class="panel" id="panel-unsettled">
@@ -130,6 +162,7 @@
         <button class="tab" data-view="memory"><span class="tab-n">3</span>MEMORY</button>
         <button class="tab" data-view="approvals"><span class="tab-n">4</span>APPROVALS<i class="badge" id="appr-badge" hidden>0</i></button>
         <button class="tab" data-view="spec"><span class="tab-n">5</span>CRASH WINDOWS</button>
+        <button class="tab" data-view="counter"><span class="tab-n">6</span>COUNTEREXAMPLE</button>
       </nav>
 
       <div class="views">
@@ -141,20 +174,52 @@
               <h3 class="view-title">TASK GRID</h3>
               <span class="view-sub" id="grid-note">—</span>
             </div>
-            <div class="fence-meter" title="lease_epoch incremented: another worker took the task over and the previous lease holder can no longer settle it">
-              <span class="lbl">FENCE ADVANCES</span>
+            <!-- Every lease handover, which is deliberately more than just the crash
+                 takeovers: a task parked for approval is re-claimed at a higher epoch
+                 when the human says yes, and that too fences the previous holder. The
+                 label says handovers so nobody reads it as a crash count. -->
+            <div class="fence-meter" title="lease_epoch increments: every time a task changed hands, including the ordinary re-claim after a human approves one. The previous lease holder can no longer settle in any of these cases.">
+              <span class="lbl">LEASE HANDOVERS (FENCED)</span>
               <b id="fence-count">0</b>
               <span class="fence-delta" id="fence-delta"></span>
             </div>
           </div>
-          <!-- The recovery narration. Hidden until KILL A WORKER is pressed, then armed,
-               then switched to the fence that actually landed. It exists because the proof
-               is a single integer incrementing inside one 132px cell, which is true and
-               unwatchable on a screen recording. -->
+
+          <!-- The recovery narration. Hidden until a chaos worker is dispatched, then
+               armed, then switched to the fence that actually landed. It exists because
+               the proof is a single integer incrementing inside one 132px cell, which is
+               true and unwatchable on a screen recording. -->
           <div class="chaosbar" id="chaosbar" hidden>
             <span class="cb-lbl" id="cb-lbl">—</span>
             <span class="cb-txt" id="cb-txt"></span>
           </div>
+
+          <!-- The fence, made large enough to survive 720p. Two facts, stated plainly:
+               the epoch moved, and the key did not. -->
+          <div class="fenceproof" id="fenceproof" hidden>
+            <div class="fp-row">
+              <span class="fp-lbl">FENCE ADVANCED</span>
+              <div class="fp-body">
+                <div class="fp-big">
+                  <span class="fp-task" id="fp-task">—</span>
+                  <span class="fp-ep"><b id="fp-from">e0</b><i>&rarr;</i><b id="fp-to">e0</b></span>
+                </div>
+                <div class="fp-note">a second worker took the lease over; every write from the
+                  worker that died is now rejected on sight — <b>lease_epoch</b> is the fencing token</div>
+              </div>
+            </div>
+            <div class="fp-row" id="fp-idem" hidden>
+              <span class="fp-lbl">IDEMPOTENCY KEY</span>
+              <div class="fp-body">
+                <div class="fp-big"><span class="fp-mono" id="fp-key">—</span>
+                  <span class="fp-same">IDENTICAL</span></div>
+                <div class="fp-note">minted by the worker that died, recovered from the receipt and
+                  re-sent by the worker that took over — <b>not regenerated</b>. The provider recognised
+                  it and replayed the original refund instead of creating a second one.</div>
+              </div>
+            </div>
+          </div>
+
           <div class="taskgrid" id="taskgrid"></div>
           <div class="view-foot">
             <div class="legend" id="legend"></div>
@@ -169,10 +234,42 @@
             <span class="view-sub">separate database · no shared transaction · the only source of truth about the real world</span>
           </div>
           <div class="scroller"><table class="tbl" id="ledger-tbl"></table></div>
+          <div class="view-foot">
+            <span><b>REPLAYS &gt; 0</b> means the provider was asked twice under one key and
+              acted once. That row is the crash actually happening, not a claim that it cannot.</span>
+          </div>
         </div>
 
         <!-- ══ MEMORY ══ -->
         <div class="view" data-view="memory">
+
+          <!-- Criterion one, stated on the surface instead of only in the schema. -->
+          <div class="classes">
+            <div class="classes-head">
+              <h4>FOUR MEMORY CLASSES — THEY DO NOT HAVE EQUAL AUTHORITY</h4>
+              <span>vector memory tells the agent what it <em>could</em> do; transactional
+                execution state decides what it <em>may</em> do</span>
+            </div>
+            <div class="classes-grid">
+              <div class="mc mc-advise">
+                <span class="mc-n">EPISODIC</span><span class="mc-a">ADVISES</span>
+                <p>what happened the last time an agent stood at this exact state and transition</p>
+              </div>
+              <div class="mc mc-advise">
+                <span class="mc-n">SEMANTIC</span><span class="mc-a">ADVISES</span>
+                <p>what is generally true of this exception kind — recalled by vector similarity</p>
+              </div>
+              <div class="mc mc-auth">
+                <span class="mc-n">PROCEDURAL</span><span class="mc-a">AUTHORIZES</span>
+                <p>the pinned policy version that permits the act, or stops it and asks a human</p>
+              </div>
+              <div class="mc mc-constrain">
+                <span class="mc-n">EXECUTION</span><span class="mc-a">CONSTRAINS</span>
+                <p>receipt · lease · fence — committed with the state change, in one transaction</p>
+              </div>
+            </div>
+          </div>
+
           <form class="recall" id="recall-form">
             <div class="recall-row">
               <label class="fld grow">
@@ -228,7 +325,33 @@
             there. The guarantee is <em>effectively-once via idempotency receipts</em> — never exactly-once
             execution, which is not obtainable against a remote provider.</p>
           </div>
-          <div class="scroller"><div class="spec-list" id="spec-tbl"></div></div>
+          <div class="scroller">
+            <!-- The timeline the windows are cut from. Its single structural claim: the
+                 receipt commits BEFORE anything can be sent, so "did an effect possibly
+                 happen?" is a point read rather than a guess about timing. -->
+            <div class="tl">
+              <div class="tl-r tl-op"><span class="tl-dot"></span><b>claim</b><span>task leaves READY under a lease and a fencing token</span></div>
+              <div class="tl-r tl-w" data-w="W1"><span class="tl-id">W1</span><span>no receipt exists — no effect is possible</span></div>
+              <div class="tl-r tl-op tl-commit"><span class="tl-dot"></span><b>prepare()</b><span class="tl-c">COMMIT</span><span>task is now ACTION_PREPARED</span></div>
+              <div class="tl-r tl-w" data-w="W2"><span class="tl-id">W2</span><span>receipt is durable — nothing has been sent yet</span></div>
+              <div class="tl-r tl-op"><span class="tl-dot"></span><b>provider.create_refund(idempotency_key=…)</b></div>
+              <div class="tl-r tl-w" data-w="W3"><span class="tl-id">W3</span><span>in flight — outcome unknown to us</span></div>
+              <div class="tl-r tl-irrev"><span class="tl-dot"></span><b>the provider mutates its ledger</b><span class="tl-mark">THE IRREVERSIBLE INSTANT</span></div>
+              <div class="tl-r tl-w tl-w-hot" data-w="W4"><span class="tl-id">W4</span><span>the effect <em>is</em> real and we have not recorded it — the only window this demo needs</span></div>
+              <div class="tl-r tl-op tl-commit"><span class="tl-dot"></span><b>settle()</b><span class="tl-c">COMMIT</span><span>receipt settled + outcome memory written, one transaction</span></div>
+              <div class="tl-foot">W5, W6 and W7 are concurrency and identity windows rather than points on this line.</div>
+            </div>
+            <div class="spec-list" id="spec-tbl"></div>
+          </div>
+        </div>
+
+        <!-- ══ COUNTEREXAMPLE ══ -->
+        <div class="view" data-view="counter">
+          <div class="view-head">
+            <h3 class="view-title">COUNTEREXAMPLE</h3>
+            <span class="view-sub">the same crash, run against a fair transcript-memory agent</span>
+          </div>
+          <div class="scroller" id="counter-out"></div>
         </div>
 
       </div>
@@ -259,6 +382,90 @@
   </div>
 
   <div class="toast" id="toast" hidden></div>
+</div>
+
+<!-- ───────────────────────────────────────────────────────────────── briefing ── -->
+<!-- Shown once, then remembered in localStorage. Reachable forever from BRIEFING in the
+     header. Built out of the same rules as the rest of the panel — hairlines, tabular
+     data, one serif for the argument — so it reads as the instrument explaining itself
+     rather than as a page that was bolted on in front of it. -->
+<div class="brief" id="brief" hidden>
+  <div class="brief-card" role="dialog" aria-modal="true" aria-labelledby="brief-q">
+    <header class="brief-top">
+      <div>
+        <span class="brief-eyebrow">AXIOM · BRIEFING</span>
+        <!-- The setup and the question are separated on purpose. Run together they wrapped
+             mid-question, and the question is the only sentence on this page a judge has
+             to leave with. -->
+        <p class="brief-setup">An agent issues a $300 refund, crashes before it records it,
+          and restarts.</p>
+        <h2 class="brief-q" id="brief-q">Does it refund twice?</h2>
+      </div>
+      <button class="btn btn-x" id="brief-x">CLOSE</button>
+    </header>
+
+    <div class="brief-body">
+
+      <section class="bsec">
+        <h3>THE CLAIM</h3>
+        <p class="blead">Memory is not saved chat history. Memory is what makes autonomous
+          <em>action</em> safe. AXIOM commits execution state and semantic memory in
+          <em>one serializable CockroachDB transaction</em>, so "did the money already move?"
+          is a point read on a durable receipt — a database fact — instead of an inference
+          from prose the agent wrote about itself.</p>
+      </section>
+
+      <section class="bsec">
+        <h3>AUTHORITY, NOT JUST RECALL</h3>
+        <table class="btbl">
+          <tr><td class="bt-n">EPISODIC</td><td class="bt-a a-adv">ADVISES</td><td>what happened last time an agent stood exactly here</td></tr>
+          <tr><td class="bt-n">SEMANTIC</td><td class="bt-a a-adv">ADVISES</td><td>what is generally true of this kind of exception</td></tr>
+          <tr><td class="bt-n">PROCEDURAL</td><td class="bt-a a-auth">AUTHORIZES</td><td>the pinned policy that permits the act — or stops it and asks a human</td></tr>
+          <tr><td class="bt-n">EXECUTION</td><td class="bt-a a-con">CONSTRAINS</td><td>receipt · lease · fence — what may happen next, at all</td></tr>
+        </table>
+        <p class="bnote">Vector memory tells the agent what it <em>could</em> do. Transactional
+          execution state decides what it <em>may</em> do. Only the third and fourth rows can
+          stop money moving.</p>
+      </section>
+
+      <section class="bsec">
+        <h3>WHAT YOU ARE ABOUT TO WATCH</h3>
+        <ol class="bsteps">
+          <li><b>Thirty order exceptions</b> are seeded against a $2,500 budget authority —
+            a hard ceiling on total spend that only a human can raise.</li>
+          <li><b>A worker is killed at crash window W4</b> — after the payment provider
+            committed the refund, before AXIOM recorded it. Money is now out of the door and
+            this system does not know.</li>
+          <li><b>The lease expires and <span class="hot">lease_epoch</span> advances.</b> The dead
+            worker is fenced: every write it could still attempt is rejected on sight.</li>
+          <li><b>A second worker finds the receipt</b> and re-sends under the <em>same</em>
+            idempotency key rather than generating a new one.</li>
+          <li><b>Three refunds exceed the $200 unattended ceiling</b> and stop for a human,
+            because procedural memory does not advise — it authorizes.</li>
+        </ol>
+      </section>
+
+      <section class="bsec">
+        <h3>THE NUMBER THAT PROVES IT</h3>
+        <p class="blead"><b class="hot">DUPLICATE REFUNDS 0</b>, read out of the payment
+          provider's own ledger — <em>together with</em> IDEMPOTENT REPLAYS of at least one.
+          Zero duplicates with zero replays proves nothing: it only means nothing was ever
+          retried. The replay is the crash actually happening.</p>
+        <p class="bnote">The guarantee is <em>effectively-once via idempotency receipts</em>.
+          It is never exactly-once execution — that is not obtainable against a remote
+          provider, and anything claiming it is lying to you.</p>
+      </section>
+
+    </div>
+
+    <footer class="brief-foot">
+      <div class="brief-acts">
+        <button class="btn btn-proof" id="brief-go">RUN THE PROOF</button>
+        <button class="btn" id="brief-skip">EXPLORE ON MY OWN</button>
+      </div>
+      <span class="brief-hint">about 40 seconds, entirely live · press <b>B</b> to reopen this</span>
+    </footer>
+  </div>
 </div>
 
 <script src="/app.js"></script>

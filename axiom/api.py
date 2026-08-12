@@ -6,8 +6,8 @@ this file. If an endpoint had to decide anything about an irreversible act, that
 would live outside `db.tx()` and outside the fence, which is the exact class of mistake
 the project exists to argue against.
 
-Three rules this module keeps
------------------------------
+Four rules this module keeps
+----------------------------
 1. **Every database access goes through `db.tx()`.** Reads pass `readonly=True` so the
    server can reject a write that leaked into a read path, and so CockroachDB can serve
    them without acquiring write intents. No route opens a raw connection.
@@ -27,6 +27,14 @@ Three rules this module keeps
    by design. `scripts/chaos_demo.py` still owns real SIGKILL, where the operator ran
    the script on purpose.
 
+4. **No endpoint may 500, and no endpoint may make "empty" look like "broken".**
+   Judging runs unattended for four weeks. Every read goes through `demo_state.tx`,
+   which survives a pooled connection the server closed while we were idle; every
+   dependency failure lands on a handler that returns JSON with a reason rather than a
+   stack trace; and the demo state heals itself before it is read. The rule the whole
+   file obeys is that a 5xx must mean "a dependency is genuinely down", a 200 must mean
+   "this is what is true", and there must be no third case.
+
 The one endpoint that is a product feature rather than a projection is
 `POST /api/memories/recall`: it returns `plan_uses_vector_index`, read out of a live
 `EXPLAIN` of the statement it just ran. Every project in this competition will *claim*
@@ -37,6 +45,7 @@ go false the moment somebody reintroduced the subquery search vector that prefli
 
 from __future__ import annotations
 
+import concurrent.futures as cf
 import contextlib
 import datetime as dt
 import decimal
@@ -47,6 +56,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 import typing as t
 import uuid
 
@@ -55,12 +65,15 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import __version__, db, embeddings, events, memory, provider, seed, tasks
-from .config import SYSTEM_TENANT, settings
+from . import (__version__, db, demo_state, embeddings, events, memory, provider, seed,
+               tasks)
+from .config import EMBED_DIMS, SYSTEM_TENANT, settings
 from .db import RetriesExhausted
+from .demo_state import Unavailable
 from .models import MemoryClass, RetrievalClass
 from .seed import DEMO_TENANT
 
@@ -154,14 +167,27 @@ def _startup_checks() -> None:
             cur.execute('SELECT count(*) AS n FROM axiom_memory')
             return n_tables, n_tasks, cur.fetchone()['n']
 
-        n_tables, n_tasks, n_mem = db.tx(_probe, readonly=True)
+        n_tables, n_tasks, n_mem = demo_state.tx(_probe, readonly=True)
         log.info('schema OK: %d axiom_* tables, %d tasks, %d memories',
                  n_tables, n_tasks, n_mem)
-        if n_tasks == 0:
-            log.warning('no tasks for any tenant: POST /api/demo/seed before demoing')
     except Exception as e:                       # noqa: BLE001 — boot check never raises
         log.error('SCHEMA UNREACHABLE (%s: %s) — apply db/001_schema.sql and check '
                   'DATABASE_URL', type(e).__name__, e)
+
+    # Heal at boot rather than on the first request, so a cold Lambda or a rebooted
+    # instance is already showing the demo by the time anyone loads the page. It is the
+    # same idempotent call the read path makes, so doing it twice costs one query.
+    try:
+        out = demo_state.ensure_demo()
+        log.info('demo state: %s', 'seeded at boot' if out.get('seeded') else 'coherent')
+    except Exception as e:                       # noqa: BLE001
+        log.error('could not establish demo state (%s: %s) — the API will retry on the '
+                  'first request', type(e).__name__, e)
+
+    try:
+        log.info('reaped %d stale agent rows', demo_state.reap_agents())
+    except Exception as e:                       # noqa: BLE001
+        log.warning('agent reap failed: %s: %s', type(e).__name__, e)
 
     try:
         s = provider.stats()
@@ -184,6 +210,10 @@ async def lifespan(_: FastAPI):
     we know what we are serving against, and this is the one moment in the process's
     life where blocking is the correct behaviour.
     """
+    # Before anything touches the database: cap how long a request will wait for a
+    # connection. The pool's default is 30 seconds, which on a dead database turns every
+    # request into a hang and an uptime monitor into a timeout rather than a 503.
+    demo_state.tune_pools()
     _startup_checks()
     yield
     db.close_pool()
@@ -247,63 +277,327 @@ def _denied(request, exc):
     return AxiomJSON({'error': 'permission_denied', 'detail': str(exc)}, status_code=403)
 
 
+# ---------------------------------------------------------------------------------
+# The four handlers below are the "no judge ever sees a stack trace" contract. Each
+# one answers a different question, and the status codes are chosen so a monitor can
+# act on them without parsing prose:
+#
+#   503  a dependency is down and it is not our fault and not our state — retry later
+#   500  a genuine defect in this process — still JSON, still no traceback on the wire
+#
+# There is no handler that turns a failure into an empty 200. A judge looking at an
+# empty grid must be able to tell "nothing has happened yet" from "the database is
+# gone", and the only honest way to do that is the status code.
+
+@app.exception_handler(Unavailable)
+def _unavailable(request, exc: Unavailable):
+    return AxiomJSON(
+        {'error': f'{exc.component}_unavailable', 'detail': exc.detail,
+         'component': exc.component},
+        status_code=503, headers={'Retry-After': '5'})
+
+
+@app.exception_handler(PoolTimeout)
+def _pool_timeout(request, exc: PoolTimeout):
+    return AxiomJSON({'error': 'db_unavailable', 'detail': f'connection pool: {exc}',
+                      'component': 'db'},
+                     status_code=503, headers={'Retry-After': '5'})
+
+
+@app.exception_handler(psycopg.Error)
+def _pg_error(request, exc: psycopg.Error):
+    # OperationalError/InterfaceError mean the connection died; everything else that
+    # reaches here is a statement this process got wrong. Both are reported as 503 with
+    # the SQLSTATE, because the caller's correct move is identical (retry, then look at
+    # the logs) and because a demo that says "23505" is more useful than one that says
+    # "Internal Server Error".
+    code = getattr(getattr(exc, 'diag', None), 'sqlstate', None)
+    log.error('database error %s: %s', code, exc)
+    return AxiomJSON({'error': 'database_error', 'sqlstate': code,
+                      'detail': f'{type(exc).__name__}: {exc}'[:400],
+                      'component': 'db'},
+                     status_code=503, headers={'Retry-After': '5'})
+
+
+@app.exception_handler(Exception)
+def _unhandled(request, exc: Exception):
+    # Starlette re-raises after this so the process still logs the traceback where an
+    # operator can read it. What it does NOT do is put the traceback on the wire.
+    log.exception('unhandled error on %s', request.url.path)
+    return AxiomJSON({'error': 'internal', 'detail': f'{type(exc).__name__}: {exc}'[:400]},
+                     status_code=500)
+
+
 # =========================================================================== HEALTH
+
+_BOOTED_AT = dt.datetime.now(dt.timezone.utc)
+
+# The vector-index probe is an EXPLAIN, so it plans without executing — but it still
+# costs a round trip, and this endpoint is what an uptime monitor hits every minute for
+# four weeks. Cached, with the age of the answer reported so nobody mistakes a cached
+# green light for a live one.
+_VEC_TTL_S = 60.0
+_vec_cache: dict[str, t.Any] = {'at': 0.0, 'value': None}
+_HEALTH_UNIT_VECTOR = [1.0] + [0.0] * (EMBED_DIMS - 1)
+
+
+def _vector_index_check() -> dict:
+    """Is the ANN path still an ANN path? Answered from a live query plan, not a belief.
+
+    This is the one health check in the file that is about correctness rather than
+    liveness. The recall query returns identical rows when the plan degrades to a full
+    primary-key scan, so nothing a human could observe in the results would catch the
+    regression — only the plan does, which is why it is worth a round trip a minute.
+
+    The probe vector is a fixed unit vector rather than a real embedding: EXPLAIN does
+    not execute, so its contents cannot matter, and using it here means the health check
+    never calls Bedrock.
+    """
+    now = time.monotonic()
+    if _vec_cache['value'] is not None and now - _vec_cache['at'] < _VEC_TTL_S:
+        return {**_vec_cache['value'], 'age_seconds': round(now - _vec_cache['at'], 1)}
+
+    out: dict[str, t.Any]
+    try:
+        def _read(cur):
+            return db.explain(cur, memory.recall_sql_for_explain(context_key=False), {
+                'vec': db.vector_literal(_HEALTH_UNIT_VECTOR),
+                'tenant': str(DEMO_TENANT),
+                'cls': str(MemoryClass.EPISODIC),
+                'rc': str(RetrievalClass.ACTIONABLE),
+                'fetch': settings.recall_k * settings.recall_overfetch,
+            })
+        plan = demo_state.tx(_read, readonly=True)
+        out = {'ok': True, 'in_use': db.uses_vector_index(plan)}
+    except Exception as e:                       # noqa: BLE001 — health never raises
+        out = {'ok': False, 'in_use': None, 'error': f'{type(e).__name__}: {e}'[:200]}
+
+    _vec_cache.update(at=now, value=out)
+    return {**out, 'age_seconds': 0.0}
+
+
+def _storage_used() -> dict:
+    """Bytes on disk for the axiom database, for free-tier headroom.
+
+    `SHOW RANGES ... WITH DETAILS` is the only size query that survives CockroachDB
+    Cloud's restriction on crdb_internal (measured: `crdb_internal.ranges_no_leases`
+    returns 42501 "Access to crdb_internal and system is restricted"). It costs ~1.4s
+    against the Cloud cluster, which is why it is behind ?deep=1 and never on the path
+    an uptime monitor polls.
+
+    The request-unit side of the free tier is NOT knowable from SQL — there is no
+    supported view for it on a Basic cluster — and this says so rather than inventing a
+    number.
+    """
+    def _read(cur):
+        cur.execute('SELECT sum(range_size) AS bytes, count(*) AS ranges '
+                    'FROM [SHOW RANGES FROM DATABASE axiom WITH DETAILS]')
+        return cur.fetchone()
+    try:
+        row = demo_state.tx(_read, readonly=True)
+        return {'bytes': int(row['bytes'] or 0), 'ranges': int(row['ranges'] or 0),
+                'request_units': 'not queryable from SQL on a Basic cluster; see the '
+                                 'CockroachDB Cloud console'}
+    except Exception as e:                       # noqa: BLE001
+        return {'error': f'{type(e).__name__}: {e}'[:200]}
+
 
 @app.get('/api/health')
 @json_route
-def health() -> dict:
-    """Liveness plus the two dependencies that actually matter.
+def health(deep: bool = Query(False, description='add storage size (~1.4s on Cloud)'),
+           heal: bool = Query(True, description='self-heal the demo if it is empty'),
+          ) -> Response:
+    """What is true right now, in the order that matters, with nothing asserted.
 
-    `db` and `provider` are reported separately because they are separate databases with
-    no shared transaction, and a demo where one is up and the other is down should say
-    so rather than return a single green light that means nothing.
+    This endpoint is deliberately the most paranoid code in the repo: it is what an
+    uptime monitor polls for four weeks and what a judge hits when something looks off,
+    so every clause is wrapped and every failure is a value rather than an exception.
+
+    Status code is part of the answer — 200 when the demo is servable, 503 when it is
+    not — because a monitor should not have to parse prose to page someone, and because
+    the alarm colour in Mission Control is reserved for genuine failure.
+
+    "Servable" means the database answers AND there is a coherent demo to show. A
+    perfectly healthy process in front of a wiped database is not healthy, it is a green
+    light in front of an empty screen, which is the specific outcome this whole change
+    exists to prevent.
     """
-    db_ok, db_err = True, None
-    try:
-        db.tx(lambda cur: cur.execute('SELECT 1'), readonly=True)
-    except Exception as e:                       # noqa: BLE001 — health never raises
-        db_ok, db_err = False, f'{type(e).__name__}: {e}'
+    checks: dict[str, t.Any] = {}
+    errors: dict[str, str] = {}
 
-    prov_ok, prov_err = True, None
-    try:
-        provider.stats()
-    except Exception as e:                       # noqa: BLE001
-        prov_ok, prov_err = False, f'{type(e).__name__}: {e}'
+    def _probe_db() -> dict:
+        t0 = time.perf_counter()
+        try:
+            demo_state.tx(lambda cur: cur.execute('SELECT 1'), readonly=True)
+            return {'ok': True,
+                    'latency_ms': round((time.perf_counter() - t0) * 1000, 1)}
+        except Exception as e:                   # noqa: BLE001
+            errors['db'] = f'{type(e).__name__}: {e}'[:300]
+            return {'ok': False,
+                    'latency_ms': round((time.perf_counter() - t0) * 1000, 1)}
 
-    return {
-        'ok': db_ok and prov_ok,
-        'db': db_ok,
-        'provider': prov_ok,
+    def _probe_provider() -> dict:
+        t0 = time.perf_counter()
+        try:
+            s = demo_state.call(provider.stats)
+            return {'ok': True,
+                    'latency_ms': round((time.perf_counter() - t0) * 1000, 1),
+                    'refunds_global': s['refunds'], 'replays_global': s['replays'],
+                    'duplicate_orders_global': s['duplicate_orders']}
+        except Exception as e:                   # noqa: BLE001
+            errors['provider'] = f'{type(e).__name__}: {e}'[:300]
+            return {'ok': False,
+                    'latency_ms': round((time.perf_counter() - t0) * 1000, 1)}
+
+    # Concurrently, because they are independent databases and a monitor should not wait
+    # for one timeout plus the other. Measured with both down: 12.0s serially, 6.0s here
+    # — and 6s is the pool wait this module sets, so the endpoint's worst case is now
+    # exactly one connection timeout no matter how many dependencies are checked.
+    with cf.ThreadPoolExecutor(max_workers=2) as pool:
+        f_db, f_prov = pool.submit(_probe_db), pool.submit(_probe_provider)
+        checks['db'], checks['provider'] = f_db.result(), f_prov.result()
+
+    demo_ok = False
+    if checks['db']['ok']:
+        try:
+            if heal:
+                demo_state.ensure_demo()
+            p = demo_state.probe()
+            demo_ok = demo_state.is_coherent(p)
+            if heal and not demo_ok:
+                # The same escalation /api/mission makes, and for the same reason: this
+                # probe is PROOF that the cached "healthy" answer is stale, so a plain
+                # ensure_demo() above may have short-circuited on it and done nothing.
+                #
+                # Measured, and the reason this branch exists: four threads polling
+                # /api/health across four POST /api/demo/reset calls produced 13 replies
+                # of 503 `status: degraded` with `db: true, provider: true, errors: {}`
+                # — a completely healthy system paging an uptime monitor because it
+                # sampled the half-second between seed.reset() and the re-seed
+                # committing. recheck=True re-probes, and the process lock inside
+                # ensure_demo makes this thread WAIT for the resetting thread rather
+                # than race it, so the re-read below sees the finished world.
+                # scripts/soak_test.py asserts no 5xx in any wave and failed on exactly
+                # these two responses before this branch existed.
+                demo_state.ensure_demo(recheck=True)
+                p = demo_state.probe()
+                demo_ok = demo_state.is_coherent(p)
+            checks['demo'] = {
+                'ok': demo_ok, 'mission_id': p.get('mission_id'),
+                'title': p.get('title'), 'state': p.get('state'),
+                'tasks': p.get('tasks'), 'by_state': p.get('by_state', {}),
+                'memories': p.get('memories'), 'active_policies': p.get('policies'),
+                'missions': p.get('missions'),
+                'budget_cents': p.get('budget_cents'), 'spent_cents': p.get('spent_cents'),
+                'self_heals_this_process': demo_state.heals(),
+            }
+        except Exception as e:                   # noqa: BLE001
+            errors['demo'] = f'{type(e).__name__}: {e}'[:300]
+            checks['demo'] = {'ok': False}
+
+        checks['vector_index'] = _vector_index_check()
+
+        try:
+            checks['workers'] = {'live': demo_state.live_workers(),
+                                 'max_concurrent': demo_state.MAX_LIVE_WORKERS}
+        except Exception as e:                   # noqa: BLE001
+            checks['workers'] = {'error': f'{type(e).__name__}: {e}'[:200]}
+
+        if deep:
+            checks['storage'] = _storage_used()
+
+    ok = checks['db']['ok'] and checks.get('provider', {}).get('ok', False) and demo_ok
+    body = {
+        # --- the shape Mission Control has always read -------------------------
+        'ok': ok,
+        'db': checks['db']['ok'],
+        'provider': checks.get('provider', {}).get('ok', False),
         'version': __version__,
         'offline': settings.offline,
-        'errors': {k: v for k, v in (('db', db_err), ('provider', prov_err)) if v},
+        'errors': errors,
+        # --- and the detail a monitor or a judge wants --------------------------
+        'status': 'ok' if ok else ('down' if not checks['db']['ok'] else 'degraded'),
+        'checks': checks,
+        'booted_at': _BOOTED_AT,
+        'uptime_seconds': round((dt.datetime.now(dt.timezone.utc) - _BOOTED_AT)
+                                .total_seconds(), 1),
+        'checked_at': dt.datetime.now(dt.timezone.utc),
     }
+    return AxiomJSON(body, status_code=200 if ok else 503)
 
 
 # ========================================================================== MISSION
 
-def _newest_mission_id(cur: psycopg.Cursor, tenant_id: uuid.UUID) -> uuid.UUID | None:
-    cur.execute("""
-        SELECT id FROM axiom_mission WHERE tenant_id = %s
-        ORDER BY created_at DESC LIMIT 1
-    """, (str(tenant_id),))
-    row = cur.fetchone()
-    return row['id'] if row else None
+# Mission selection lives in demo_state.select_mission_id now, and it is no longer
+# "newest". The old rule handed the screen to whichever mission was created last, which
+# meant every run of scripts/counterexample.py — a one-task mission on the same tenant —
+# replaced the 30-task demo with a single tile in a thirty-tile frame. Verified on the
+# production cluster: the deployed demo was showing "Counterexample / one refund, one
+# crash" with a $1,000 budget and a 1-tile grid.
+
+# What the API returns when the tenant genuinely has nothing. It is a 200 with a shape
+# the dashboard can render, not a 404: `renderMission` keys off `m.id`, so a body with a
+# null id paints its own empty state ("no mission — seed the demo to create one") while
+# a 404 increments the failure counter and latches the POLL lamp into the alarm colour.
+# Empty is not broken, and the API must not tell the UI that it is.
+def _empty_mission(tenant_id: uuid.UUID, note: str) -> dict:
+    return {'id': None, 'title': None, 'goal': None, 'state': 'EMPTY',
+            'budget_cents': 0, 'spent_cents': 0, 'created_at': None,
+            'by_state': {}, 'empty': True, 'tenant_id': tenant_id, 'note': note}
+
+
+def _heal_if_demo(tenant_id: uuid.UUID) -> str:
+    """Self-heal, but only ever for the demo tenant. Returns a note for the payload.
+
+    A request carrying `X-Axiom-Tenant` for somebody else's tenant must never cause this
+    server to write rows into it. Multi-tenancy is a claim this project makes; silently
+    seeding a stranger's tenant because their queue looked empty would make it a lie.
+    """
+    if tenant_id != DEMO_TENANT:
+        return 'no mission for this tenant'
+    # recheck=True, not the default: the caller reached this function BECAUSE a read
+    # just came back empty, which is proof that any cached "the demo is healthy" answer
+    # is stale. The failure backoff still applies, so a dead database is not hammered.
+    out = demo_state.ensure_demo(recheck=True)
+    if out.get('waiting'):
+        return 'seeding in progress'
+    if out.get('disabled'):
+        return 'no mission; auto-seed is off (POST /api/demo/seed)'
+    return 'no mission; POST /api/demo/seed to create one'
 
 
 @app.get('/api/mission')
 @json_route
 def mission(tenant_id: uuid.UUID = Depends(_tenant)) -> dict:
+    """The mission the dashboard shows — healing the demo first if there is none.
+
+    The heal is attempted BEFORE the read and the read is what decides the answer, so a
+    heal that raced another process still returns that process's mission rather than an
+    error about the race.
+    """
     def _read(cur):
-        mid = _newest_mission_id(cur, tenant_id)
+        mid = demo_state.select_mission_id(cur, tenant_id)
         if mid is None:
             return {}
+        # Retire the mission if every task is terminal. Deliberately on the read path and
+        # therefore NOT readonly: no worker is in a position to know it settled the last
+        # task, so without this the header reads STATE RUNNING forever — claiming work is
+        # in flight to a viewer looking at an idle queue. Conditional on state='RUNNING'
+        # inside the UPDATE, so concurrent readers cannot double-transition it.
+        tasks.settle_mission_if_complete(cur, tenant_id=tenant_id, mission_id=mid)
         return tasks.mission_summary(cur, tenant_id=tenant_id, mission_id=mid)
 
-    out = db.tx(_read, readonly=True)
-    if not out:
-        raise HTTPException(404, 'no mission for this tenant; POST /api/demo/seed first')
-    return out
+    out = demo_state.tx(_read)
+    if out:
+        # The one place the API acts on its own. Rate-limited to a probe every 15s and a
+        # worker every 90s, and refuses outright unless the board has been still for two
+        # minutes with claimable work and no live worker. See _maybe_autoheal.
+        _maybe_autoheal()
+        return out
+
+    note = _heal_if_demo(tenant_id)
+    out = demo_state.tx(_read, readonly=True)
+    return out or _empty_mission(tenant_id, note)
 
 
 # ============================================================================ TASKS
@@ -312,10 +606,21 @@ def mission(tenant_id: uuid.UUID = Depends(_tenant)) -> dict:
 @json_route
 def list_tasks(limit: int = Query(200, ge=1, le=1000),
                tenant_id: uuid.UUID = Depends(_tenant)) -> list[dict]:
+    """The shown mission's tasks. Heals once if the tenant has no mission at all.
+
+    An empty list is a legitimate answer here (a mission with no tasks is a state the
+    system can be in), so this route never invents a payload — it heals, re-reads, and
+    reports whatever is actually there.
+    """
     def _read(cur):
-        mid = _newest_mission_id(cur, tenant_id)
+        mid = demo_state.select_mission_id(cur, tenant_id)
         return tasks.list_tasks(cur, tenant_id=tenant_id, mission_id=mid, limit=limit)
-    return db.tx(_read, readonly=True)
+
+    out = demo_state.tx(_read, readonly=True)
+    if not out:
+        _heal_if_demo(tenant_id)
+        out = demo_state.tx(_read, readonly=True)
+    return out
 
 
 @app.get('/api/tasks/{task_id}')
@@ -346,7 +651,7 @@ def task_detail(task_id: uuid.UUID,
         """, (str(tenant_id), str(task_id)))
         return {'task': row, 'events': journal, 'attempts': cur.fetchall()}
 
-    out = db.tx(_read, readonly=True)
+    out = demo_state.tx(_read, readonly=True)
     if out is None:
         raise HTTPException(404, f'task {task_id} not found')
     return out
@@ -358,8 +663,8 @@ def task_detail(task_id: uuid.UUID,
 @json_route
 def event_timeline(limit: int = Query(200, ge=1, le=2000),
                    tenant_id: uuid.UUID = Depends(_tenant)) -> list[dict]:
-    return db.tx(lambda cur: events.timeline(cur, tenant_id=tenant_id, limit=limit),
-                 readonly=True)
+    return demo_state.tx(lambda cur: events.timeline(cur, tenant_id=tenant_id,
+                                                     limit=limit), readonly=True)
 
 
 # ======================================================================== APPROVALS
@@ -373,8 +678,8 @@ class DecideBody(BaseModel):
 @app.get('/api/approvals')
 @json_route
 def approvals(tenant_id: uuid.UUID = Depends(_tenant)) -> list[dict]:
-    return db.tx(lambda cur: tasks.pending_approvals(cur, tenant_id=tenant_id),
-                 readonly=True)
+    return demo_state.tx(lambda cur: tasks.pending_approvals(cur, tenant_id=tenant_id),
+                         readonly=True)
 
 
 @app.post('/api/approvals/{approval_id}/decide')
@@ -392,6 +697,7 @@ def decide(approval_id: uuid.UUID, body: DecideBody,
                               approved=body.approved, decided_by=body.decided_by,
                               note=body.note)
     try:
+        demo_state.warm()          # a live pool, so the write below is not retried
         db.tx(_write)
     except ValueError as e:
         raise HTTPException(409, str(e))
@@ -423,9 +729,9 @@ def memories(limit: int = Query(100, ge=1, le=1000),
     invisible, and the gate is the interesting part: those rows sit in a different
     partition of the vector index and cannot enter an ANN candidate set at all.
     """
-    return db.tx(lambda cur: memory.browse(cur, tenant_id=tenant_id, limit=limit,
-                                           include_inadmissible=include_inadmissible),
-                 readonly=True)
+    return demo_state.tx(lambda cur: memory.browse(
+        cur, tenant_id=tenant_id, limit=limit,
+        include_inadmissible=include_inadmissible), readonly=True)
 
 
 @app.post('/api/memories/{memory_id}/quarantine')
@@ -443,6 +749,7 @@ def quarantine(memory_id: uuid.UUID, body: QuarantineBody,
         memory.quarantine(cur, tenant_id=tenant_id, memory_id=memory_id,
                           reason=body.reason, by=body.by)
     try:
+        demo_state.warm()          # a live pool, so the write below is not retried
         db.tx(_write)
     except ValueError as e:
         raise HTTPException(409, str(e))
@@ -458,9 +765,8 @@ def memory_effects(memory_id: uuid.UUID,
     Backed by the partial index axiom_attempt_by_license, which exists for exactly the
     moment you discover a memory was poisoned and need to know what it already bought.
     """
-    return db.tx(lambda cur: memory.effects_licensed_by(cur, tenant_id=tenant_id,
-                                                        memory_id=memory_id),
-                 readonly=True)
+    return demo_state.tx(lambda cur: memory.effects_licensed_by(
+        cur, tenant_id=tenant_id, memory_id=memory_id), readonly=True)
 
 
 @app.post('/api/memories/recall')
@@ -476,8 +782,21 @@ def recall(body: RecallBody = Body(...),
     plan degrades to a full primary-key scan, so nothing a human could see in the result
     set would catch the regression — only the plan does. Surfacing it in the UI turns an
     architectural assertion into an observation.
+
+    Two degradations, and neither of them lies:
+
+    * The embedder is a network dependency (Bedrock, unless AXIOM_OFFLINE). If it is
+      down there is no query vector, so there is no recall to report and this returns
+      503 naming the embedder rather than a 500 naming nothing.
+    * The EXPLAIN is a second statement that can fail on its own. If it does, the hits
+      are still real and are still returned — but `plan_uses_vector_index` becomes NULL
+      rather than false, because "we could not check" and "it degraded to a scan" are
+      different claims and only one of them is an alarm.
     """
-    vec = embeddings.embed_list(body.query)
+    try:
+        vec = embeddings.embed_list(body.query)
+    except Exception as e:                       # noqa: BLE001 — Bedrock is a dependency
+        raise Unavailable('embeddings', f'{type(e).__name__}: {e}') from e
     literal = db.vector_literal(vec)
     k = body.k
     fetch = k * settings.recall_overfetch
@@ -493,12 +812,19 @@ def recall(body: RecallBody = Body(...),
         }
         if body.context_key is not None:
             params['ck'] = body.context_key
-        plan = db.explain(cur,
-                          memory.recall_sql_for_explain(context_key=body.context_key is not None),
-                          params)
+        try:
+            plan = db.explain(
+                cur, memory.recall_sql_for_explain(context_key=body.context_key is not None),
+                params)
+        except psycopg.Error as e:
+            # The EXPLAIN aborts the surrounding transaction on some errors, so the hits
+            # were already materialised above and nothing after this point touches the
+            # cursor.
+            plan = f'EXPLAIN unavailable: {type(e).__name__}: {e}'
         return hits, plan
 
-    hits, plan = db.tx(_read, readonly=True)
+    hits, plan = demo_state.tx(_read, readonly=True)
+    plan_ok = not plan.startswith('EXPLAIN unavailable')
     return {
         'hits': [{
             'id': h.id, 'content': h.content, 'outcome': h.outcome,
@@ -507,7 +833,8 @@ def recall(body: RecallBody = Body(...),
             'confidence': h.confidence, 'context_key': h.context_key,
             'task_id': h.task_id, 'attempt_id': h.attempt_id,
         } for h in hits],
-        'plan_uses_vector_index': db.uses_vector_index(plan),
+        'plan_uses_vector_index': db.uses_vector_index(plan) if plan_ok else None,
+        'plan_checked': plan_ok,
         'plan': plan,
     }
 
@@ -516,12 +843,28 @@ def recall(body: RecallBody = Body(...),
 
 @app.get('/api/agents')
 @json_route
-def agents() -> list[dict]:
-    """The worker pool. Rows live under the SYSTEM tenant, not the demo tenant.
+def agents(limit: int = Query(50, ge=1, le=200)) -> list[dict]:
+    """The worker pool, newest heartbeat first, CAPPED.
 
+    Rows live under the SYSTEM tenant, not the demo tenant.
     `seconds_since_heartbeat` is computed server-side against the cluster's clock rather
     than the browser's: a worker the demo just SIGKILLed must read as stale even if the
     viewer's laptop clock is minutes off.
+
+    The cap is the fix for a real defect, not a precaution. This route had no LIMIT, the
+    rail renders every row it is given, and one row is registered per worker start —
+    which is once per RUN MISSION and once per KILL A WORKER. The production cluster was
+    already returning twelve, ten of them struck-through DEAD, and the panel below them
+    was being squeezed into an overlap. Forty judges clicking twice each is eighty rows
+    of a list whose useful length is about three.
+
+    Capping in the API rather than the renderer is deliberate: a bounded endpoint cannot
+    be un-bounded by a change to the UI, and the UI is not the only consumer. The default
+    is 50 rather than the six the rail actually paints, because web/app.js prints
+    "+N earlier" from the length of what it was given — a tighter cap here would silently
+    make that count wrong, and a number that is quietly wrong is worse than a long list.
+    Rows older than an hour are deleted outright by demo_state.reap_agents(), so 50 is a
+    ceiling the table does not normally approach.
     """
     def _read(cur):
         cur.execute("""
@@ -530,9 +873,10 @@ def agents() -> list[dict]:
                    extract(epoch FROM (now() - heartbeat_at)) AS seconds_since_heartbeat
             FROM axiom_agent WHERE tenant_id = %s
             ORDER BY heartbeat_at DESC
-        """, (str(SYSTEM_TENANT),))
+            LIMIT %s
+        """, (str(SYSTEM_TENANT), limit))
         return cur.fetchall()
-    return db.tx(_read, readonly=True)
+    return demo_state.tx(_read, readonly=True)
 
 
 # ========================================================================= RECEIPTS
@@ -546,31 +890,29 @@ def unsettled(tenant_id: uuid.UUID = Depends(_tenant)) -> list[dict]:
     is the question you actually want during an incident. An empty list means every
     authorized effect has a recorded outcome.
     """
-    return db.tx(lambda cur: tasks.unsettled_receipts(cur, tenant_id=tenant_id),
-                 readonly=True)
+    return demo_state.tx(lambda cur: tasks.unsettled_receipts(cur, tenant_id=tenant_id),
+                         readonly=True)
 
 
 # ========================================================================= PROVIDER
 
-def _mission_order_refs() -> set[str] | None:
-    """The order refs belonging to the newest mission, or None if there is no mission.
+def _mission_order_refs() -> set[str]:
+    """The order refs belonging to the SHOWN mission. Possibly empty; never None.
 
     The provider has no notion of our tenants — correctly, since it is a different
     company's system in the story and a different database in fact. So scoping has to
     happen HERE, by asking AXIOM which orders this mission touched and filtering the
     external ledger to those.
+
+    This used to return None when there was no mission, and both callers read None as
+    "fall back to the global ledger". That fallback is how the headline number gets
+    poisoned: scripts/counterexample.py double-refunds an order ON PURPOSE, and a
+    dashboard with no mission would have shown that deliberate duplicate as DUPLICATE
+    REFUNDS 1 under a mission grid that had nothing to do with it. An empty scope now
+    means an empty scope — zero refunds, zero duplicates, nothing claimed.
     """
-    def _q(cur):
-        cur.execute("""
-            SELECT payload->>'order_ref' AS order_ref
-            FROM axiom_task
-            WHERE tenant_id = %s AND mission_id = (
-                SELECT id FROM axiom_mission WHERE tenant_id = %s
-                ORDER BY created_at DESC LIMIT 1)
-        """, (str(seed.DEMO_TENANT), str(seed.DEMO_TENANT)))
-        return {r['order_ref'] for r in cur.fetchall() if r['order_ref']}
-    refs = db.tx(_q, readonly=True)
-    return refs or None
+    return demo_state.tx(
+        lambda cur: demo_state.mission_order_refs(cur, seed.DEMO_TENANT), readonly=True)
 
 
 @app.get('/api/provider/ledger')
@@ -587,11 +929,11 @@ def provider_ledger(limit: int = Query(200, ge=1, le=1000),
     disagree with it on camera, which is the last thing you want in the one panel whose
     job is to be trusted. `scope=global` returns the raw external record.
     """
-    rows = provider.ledger(limit=limit)
+    rows = demo_state.call(lambda: provider.ledger(limit=limit))
     if scope == 'global':
         return rows
     refs = _mission_order_refs()
-    return rows if refs is None else [r for r in rows if r['order_ref'] in refs]
+    return [r for r in rows if r['order_ref'] in refs]
 
 
 @app.get('/api/provider/stats')
@@ -608,28 +950,28 @@ def provider_stats(scope: str = Query('mission', pattern='^(mission|global)$')) 
     from the global figure: a duplicate outside this mission is still a real duplicate,
     but it is not THIS mission's claim, and conflating the two is how a headline number
     stops meaning anything.
+
+    The empty-scope branch is not a formality. `provider.stats()` treats an empty
+    `order_refs` as "no filter" and returns the GLOBAL ledger, which includes the
+    deliberate double refund that scripts/counterexample.py creates to prove the thesis.
+    A dashboard between missions would then have printed DUPLICATE REFUNDS 1 in
+    48-point type, over a grid that had nothing to do with it, and the one number this
+    entire project is judged on would have been somebody else's evidence.
     """
     if scope == 'global':
-        return provider.stats()
+        return demo_state.call(provider.stats)
 
     refs = _mission_order_refs()
-    rows = provider.ledger(limit=1000)
-    if refs is not None:
-        rows = [r for r in rows if r['order_ref'] in refs]
+    if not refs:
+        return {'refunds': 0, 'total_cents': 0, 'replays': 0, 'verdicts': {},
+                'duplicate_orders': 0, 'scope': 'mission', 'orders_in_scope': 0}
 
-    by_order: dict[str, int] = {}
-    for r in rows:
-        by_order[r['order_ref']] = by_order.get(r['order_ref'], 0) + 1
-
-    glob = provider.stats()
-    return {
-        'refunds': len(rows),
-        'total_cents': sum(int(r['amount_cents'] or 0) for r in rows),
-        'replays': sum(int(r['replay_count'] or 0) for r in rows),
-        'verdicts': glob['verdicts'],       # request-level, not order-level: not scopable
-        'duplicate_orders': sum(1 for n in by_order.values() if n > 1),
-        'scope': 'mission',
-    }
+    # Scoped in SQL rather than in Python: provider.stats(order_refs) applies the same
+    # filter to the refund table AND the request log, so `verdicts` is scoped too.
+    out = demo_state.call(lambda: provider.stats(sorted(refs)))
+    out['scope'] = 'mission'
+    out['orders_in_scope'] = len(refs)
+    return out
 
 
 # ==================================================================== CRASH WINDOWS
@@ -765,7 +1107,13 @@ def rewind(seconds_ago: int = Query(30, ge=1, le=3600),
                 'seconds_ago': seconds_ago}
 
     try:
-        return db.tx(_read, as_of=f'-{int(seconds_ago)}s')
+        return demo_state.tx(_read, as_of=f'-{int(seconds_ago)}s')
+    # A dead connection is not a bad request. Without this clause the OperationalError
+    # below would be caught by the generic `psycopg.Error` branch and reported as "AS OF
+    # SYSTEM TIME is out of range", which is a plausible-sounding lie about a database
+    # that is simply unreachable.
+    except (psycopg.OperationalError, psycopg.InterfaceError) as e:
+        raise Unavailable('db', f'{type(e).__name__}: {e}') from e
     # 42P01 UndefinedTable / 3D000 InvalidCatalogName. psycopg has no `UndefinedDatabase`
     # — the SQLSTATE for "database does not exist" is 3D000, which it names
     # InvalidCatalogName. Naming it wrong turns this handler into a 500 at request time,
@@ -783,13 +1131,44 @@ def rewind(seconds_ago: int = Query(30, ge=1, le=3600),
 
 
 # ============================================================================= DEMO
+#
+# Everything below this line MUTATES, and every one of these routes is reachable by
+# anyone who can reach the demo URL, from any origin (CORS is deliberately open; there
+# is no authenticated state to protect). Three protections apply to all of them:
+#
+#   1. An optional shared token. Set AXIOM_DEMO_TOKEN in the deployed environment and
+#      these routes require `X-Axiom-Demo-Token`; leave it unset and they stay open,
+#      which is what a laptop demo and the test suite want. It is a demo control panel,
+#      not a login: the point is to keep a crawler from resetting the board under a
+#      judge, not to protect a secret.
+#   2. A minimum interval per route (demo_state.gate). Two judges on the same afternoon
+#      are welcome. One judge's double-click, or one crawler's retry loop, is not.
+#   3. Nothing here can create unbounded work: seed is idempotent and capped, reset
+#      re-seeds rather than emptying, and run-worker refuses to start a fourth worker.
+
+DEMO_TOKEN = os.environ.get('AXIOM_DEMO_TOKEN', '')
+
+
+def _demo_auth(x_axiom_demo_token: str | None = Header(default=None)) -> None:
+    if DEMO_TOKEN and x_axiom_demo_token != DEMO_TOKEN:
+        raise HTTPException(403, 'demo controls are token-gated on this deployment; '
+                                 'send X-Axiom-Demo-Token')
+
+
+def _gate(name: str, seconds: float) -> None:
+    wait = demo_state.gate(name, seconds)
+    if wait:
+        raise HTTPException(
+            429, f'{name} is rate limited on the public demo — retry in {wait:.0f}s',
+            headers={'Retry-After': str(int(wait) + 1)})
+
 
 class SeedBody(BaseModel):
     tasks: int = Field(default=30, ge=1, le=500)
     reset: bool = True
 
 
-@app.post('/api/demo/seed')
+@app.post('/api/demo/seed', dependencies=[Depends(_demo_auth)])
 @json_route
 def demo_seed(body: SeedBody = Body(default=SeedBody())) -> dict:
     """Rebuild the demo world: tenant, policy, mission, order exceptions, prior memories.
@@ -797,18 +1176,40 @@ def demo_seed(body: SeedBody = Body(default=SeedBody())) -> dict:
     Scoped to the demo tenant by construction — axiom.seed only ever touches DEMO_TENANT
     and the provider ledger, so this cannot be pointed at anything else by a header.
     """
+    _gate('seed', 8)
+    demo_state.warm()               # so the writes below meet a proven-live connection
     if body.reset:
         seed.reset()
     out = seed.seed(n_tasks=body.tasks)
+    demo_state.invalidate()         # the cached "healthy" answer is now about old rows
     return {'mission_id': out['mission_id'], 'tasks': out['tasks'],
             'memories': out['memories'], 'tenant_id': out['tenant_id']}
 
 
-@app.post('/api/demo/reset')
+class ResetBody(BaseModel):
+    # Default TRUE, and this is the whole point of the flag existing. RESET used to wipe
+    # the demo tenant and stop: /api/mission then 404'd, the grid and the journal went
+    # empty, the POLL lamp latched into the alarm colour, and the only way back was a
+    # button one over that a judge had no reason to press. A demo control that can
+    # permanently break the demo is not a control, it is a trap — so reset now means
+    # "back to a clean board", and emptiness is available to scripts that ask for it.
+    reseed: bool = True
+
+
+@app.post('/api/demo/reset', dependencies=[Depends(_demo_auth)])
 @json_route
-def demo_reset() -> dict:
+def demo_reset(body: ResetBody = Body(default=ResetBody())) -> dict:
+    _gate('reset', 15)
+    demo_state.warm()
     seed.reset()
-    return {'ok': True}
+    demo_state.invalidate()
+    if not body.reseed:
+        return {'ok': True, 'reseeded': False,
+                'note': 'demo tenant and external ledger cleared; POST /api/demo/seed '
+                        'or GET /api/mission to rebuild'}
+    out = demo_state.ensure_demo(force=True)
+    return {'ok': True, 'reseeded': True, 'mission_id': out.get('mission_id'),
+            'tasks': out.get('created_tasks'), 'memories': out.get('created_memories')}
 
 
 class RunWorkerBody(BaseModel):
@@ -816,7 +1217,7 @@ class RunWorkerBody(BaseModel):
     seconds: int = Field(45, ge=5, le=300)
 
 
-@app.post('/api/demo/run-worker')
+@app.post('/api/demo/run-worker', dependencies=[Depends(_demo_auth)])
 @json_route
 def demo_run_worker(body: RunWorkerBody = Body(default=RunWorkerBody())) -> dict:
     """Start a worker to drain the queue — optionally one that will die mid-refund.
@@ -838,12 +1239,32 @@ def demo_run_worker(body: RunWorkerBody = Body(default=RunWorkerBody())) -> dict
         because a synchronous invoke would bill the API's wall-clock time waiting for it.
       otherwise               -> a detached local subprocess, for laptop demos and the
         chaos script. Same worker module, same code path.
+
+    The refusal at the top is the month-of-judging fix. Every start registers a row in
+    axiom_agent and, locally, a python process; nothing used to stop the fortieth. A
+    demo URL that quietly accumulates processes on a one-core free-tier instance is a
+    demo URL that is fast in week one and dead in week three.
     """
+    _gate('run-worker', 3)
+    live = demo_state.live_workers()
+    if live >= demo_state.MAX_LIVE_WORKERS:
+        # Deliberately a 200, not a 429: the caller asked for the queue to be worked and
+        # the queue IS being worked. Nothing failed, so nothing should turn red.
+        return {'ok': True, 'started': False, 'live_workers': live,
+                'note': f'{live} workers are already draining this queue; '
+                        f'not starting another'}
+    out = _start_worker(mode=body.mode, seconds=body.seconds)
+    demo_state.reap_agents()      # one bounded DELETE per start, so rows cannot pile up
+    return out
+
+
+def _start_worker(*, mode: str, seconds: int) -> dict:
+    """Start one worker. Shared by the route above and the self-heal path below."""
     fn = os.environ.get('AXIOM_WORKER_LAMBDA')
-    chaos = body.mode == 'chaos'
+    chaos = mode == 'chaos'
 
     if fn:
-        payload = json.dumps({'mode': body.mode, 'seconds': body.seconds,
+        payload = json.dumps({'mode': mode, 'seconds': seconds,
                               'chaos_post': 1.0 if chaos else 0.0})
         try:
             import boto3
@@ -851,8 +1272,8 @@ def demo_run_worker(body: RunWorkerBody = Body(default=RunWorkerBody())) -> dict
                 FunctionName=fn, InvocationType='Event', Payload=payload.encode())
         except Exception as e:                       # noqa: BLE001
             raise HTTPException(502, f'could not invoke worker lambda {fn}: {e}') from e
-        return {'ok': True, 'backend': 'lambda', 'function': fn, 'mode': body.mode,
-                'status': resp.get('StatusCode')}
+        return {'ok': True, 'started': True, 'backend': 'lambda', 'function': fn,
+                'mode': mode, 'status': resp.get('StatusCode')}
 
     env = dict(os.environ)
     if chaos:
@@ -865,7 +1286,33 @@ def demo_run_worker(body: RunWorkerBody = Body(default=RunWorkerBody())) -> dict
         cwd=str(REPO_ROOT), env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True)      # survives this request; not our child to reap
-    return {'ok': True, 'backend': 'subprocess', 'pid': proc.pid, 'mode': body.mode}
+    return {'ok': True, 'started': True, 'backend': 'subprocess', 'pid': proc.pid,
+            'mode': mode}
+
+
+def _maybe_autoheal() -> None:
+    """Finish an abandoned run, if the board has been abandoned. Best effort, never raises.
+
+    The scenario this exists for: a judge starts a chaos worker, the worker dies inside
+    crash window W4 exactly as designed, and the judge closes the tab. Three tasks are
+    left holding an expired lease. AXIOM recovers those the moment ANY worker runs — that
+    is the entire product — but if nobody ever runs one, the next judge, eleven days
+    later, opens the URL and sees a board frozen mid-recovery. The system would be
+    correct and would look broken.
+
+    Every condition in `should_autoheal` is a reason NOT to act (a live worker, a board
+    that changed in the last two minutes, nothing claimable, a heal ninety seconds ago),
+    because the worst outcome here is a worker draining the queue during a take the
+    operator is recording. Set AXIOM_DEMO_AUTOHEAL=0 to switch it off entirely.
+    """
+    try:
+        go, why = demo_state.should_autoheal()
+        if not go:
+            return
+        log.warning('auto-heal: starting a drain worker (%s)', why)
+        _start_worker(mode='drain', seconds=60)
+    except Exception as e:                           # noqa: BLE001 — never break a poll
+        log.warning('auto-heal skipped: %s: %s', type(e).__name__, e)
 
 
 # ======================================================================= STATIC UI

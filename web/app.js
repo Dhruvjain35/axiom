@@ -69,6 +69,24 @@ const shortId = (id) => (id ? String(id).slice(0, 8) : '—');
 const TASK_STATES = ['PENDING', 'READY', 'LEASED', 'AWAITING_APPROVAL',
   'ACTION_PREPARED', 'SUCCEEDED', 'FAILED', 'DEAD_LETTER', 'CANCELLED'];
 
+/** What the operator sees, which is not the same list.
+ *
+ *  DEAD_LETTER is one database state covering two outcomes that are nothing alike, and
+ *  painting both of them in the alarm colour is a lie by palette. worker.py sends an
+ *  `escalate` triage there — no receipt was ever minted, no money moved, a human now owns
+ *  the case — and it sends genuine budget/retry exhaustion there too. Only the second is
+ *  a failure. The two are distinguishable from the row itself (see isEscalated), so the
+ *  interface distinguishes them: ESCALATED is --hold, the colour this panel already uses
+ *  for "a human owns it", and the alarm colour stays reserved for things that are wrong. */
+const DISPLAY_STATES = ['PENDING', 'READY', 'LEASED', 'AWAITING_APPROVAL',
+  'ACTION_PREPARED', 'SUCCEEDED', 'ESCALATED', 'FAILED', 'DEAD_LETTER', 'CANCELLED'];
+
+function isEscalated(t) {
+  return t.state === 'DEAD_LETTER' && t.result && t.result.action === 'escalate';
+}
+/** The state class this task should render as. */
+function viewState(t) { return isEscalated(t) ? 'ESCALATED' : t.state; }
+
 const SHARD_COUNT = 16;
 
 // ──────────────────────────────────────────────────────────────────────── api ──
@@ -112,6 +130,27 @@ async function post(path, body) {
   });
 }
 
+/** /api/mission alone, because its 404 is not a fault.
+ *
+ *  An empty board is a legitimate state — it is what RESET produces, and it is what a
+ *  judge lands on if they press RESET before SEED. The generic get() counted that 404 as
+ *  an API failure, which latched the POLL lamp in the alarm colour on a page where
+ *  nothing was wrong, and returned null, which made the caller skip renderMission and
+ *  leave the static "waiting for /api/mission" placeholder on screen forever. Both bugs
+ *  come from one conflation. A 404 here means "no mission"; say so and move on. */
+async function getMission() {
+  P.reqs++;
+  try {
+    const res = await fetch('/api/mission', { headers: { accept: 'application/json' } });
+    if (res.status === 404) return {};
+    if (!res.ok) { apiFailures++; return null; }
+    return await res.json();
+  } catch (e) {
+    apiFailures++;
+    return null;
+  }
+}
+
 // ────────────────────────────────────────────────────────────────────── state ──
 
 const S = {
@@ -122,6 +161,8 @@ const S = {
   fenced: new Set(),        // task_ids that have been fenced since page load
   fenceFrom: new Map(),     // task_id -> {from, to, at} for the recent-fence callout
   fenceCount: 0,
+  recoveries: 0,            // task.recovered events seen — see the note in renderEvents
+  receiptKeys: new Map(),   // task_id -> idempotency_key, captured while still unsettled
   changed: false,           // did this poll cycle observe anything at all? drives backoff
   chaosAt: 0,               // when KILL A WORKER was last fired; arms the recovery banner
   missionSig: '',
@@ -184,6 +225,7 @@ const P = {
   lastTick: 0,
   reqs: 0,
   busy: false,
+  frozen: false,     // held across a seed/reset; see withPollHeld
 };
 
 // ─────────────────────────────────────────────────────────────────────── toast ──
@@ -220,8 +262,17 @@ function renderMission(m) {
 
   S.mission = m && m.id ? m : null;
   if (!S.mission) {
+    // Reachable now that a 404 is a value rather than an exception. Clear every field the
+    // populated branch writes — a half-cleared strip showing the previous mission's uuid
+    // next to "no mission" is worse than either.
     $('#m-title').textContent = 'no mission';
-    $('#m-goal').textContent = 'seed the demo to create one';
+    $('#m-goal').textContent = 'press RUN THE PROOF, or SEED to set the board up by hand';
+    $('#m-state').textContent = '—';
+    $('#m-uuid').textContent = '—';
+    $('#m-created').textContent = '—';
+    $('#b-nums').textContent = '— / —';
+    $('#b-fill').style.width = '0%';
+    $('#statestrip').innerHTML = '';
     return;
   }
   $('#m-title').textContent = m.title || '—';
@@ -242,10 +293,28 @@ function renderMission(m) {
     `<span style="color:var(--faint)"> / ${esc(money(budget))}</span>` +
     `<span style="color:var(--ghost)"> · ${pct.toFixed(0)}%</span>`;
 
-  const by = m.by_state || {};
-  $('#statestrip').innerHTML = TASK_STATES
-    .filter((s) => by[s])
-    .map((s) => `<span class="sc"><i class="mark m-${s}"></i>${esc(s)} <b>${by[s]}</b></span>`)
+  renderStateStrip(m.by_state || {});
+}
+
+/** The per-state counts under the budget bar.
+ *
+ *  Preferred source is the task list rather than the mission's server-side by_state,
+ *  because only the task rows carry `result` and therefore only they can tell an
+ *  escalation apart from a genuine dead letter. by_state is the fallback for the moment
+ *  before the first /api/tasks lands, and for a mission larger than the 300-row page. */
+function renderStateStrip(byState) {
+  let counts = byState || {};
+  const total = Object.values(counts).reduce((a, b) => a + Number(b), 0);
+  if (S.tasks.length && S.tasks.length >= total) {
+    counts = {};
+    for (const t of S.tasks) {
+      const k = viewState(t);
+      counts[k] = (counts[k] || 0) + 1;
+    }
+  }
+  $('#statestrip').innerHTML = DISPLAY_STATES
+    .filter((s) => counts[s])
+    .map((s) => `<span class="sc"><i class="mark m-${s}"></i>${esc(s)} <b>${counts[s]}</b></span>`)
     .join('');
 }
 
@@ -256,11 +325,38 @@ function renderProviderStats(p) {
   S.pstats = p;
   if (!p) return;
   const dupes = Number(p.duplicate_orders || 0);
+  const replays = Number(p.replays || 0);
+  const refunds = Number(p.refunds || 0);
   $('#dupes').textContent = String(dupes);
   $('#moneyshot').classList.toggle('is-alarm', dupes > 0);
   $('#p-refunds').textContent = String(p.refunds != null ? p.refunds : '—');
   $('#p-replays').textContent = String(p.replays != null ? p.replays : '—');
   $('#p-total').textContent = moneyShort(p.total_cents);
+
+  // The honesty line, and the reason this dashboard is worth trusting at all.
+  //
+  // DUPLICATE REFUNDS 0 in 46-point type is unearned on a board where nothing was ever
+  // retried — zero is also what you get by doing nothing. The claim only becomes a proof
+  // once the provider has recorded at least one idempotent replay, because a replay is
+  // the crash actually having happened. Say which of the two states the number is in,
+  // rather than letting the big number imply the stronger one.
+  const v = $('#dup-verdict');
+  v.className = 'money-verdict';
+  if (!refunds) {
+    v.textContent = 'nothing refunded yet — nothing to prove';
+  } else if (dupes > 0) {
+    v.classList.add('is-alarm');
+    v.textContent = dupes + (dupes === 1 ? ' order was' : ' orders were') + ' refunded more than once';
+  } else if (replays === 0) {
+    v.classList.add('is-unproven');
+    v.textContent = 'no replay observed — 0 duplicates is not yet a proof';
+  } else {
+    v.classList.add('is-proven');
+    v.textContent = 'PROVEN · ' + replays + ' idempotent replay' + (replays === 1 ? '' : 's')
+      + ' at the crash instant, 0 duplicates';
+  }
+
+  if (PF.running) paintProofEvidence();
 }
 
 // ────────────────────────────────────────────────────────────────── task grid ──
@@ -285,7 +381,7 @@ function cellHTML(t, fenced) {
 
   return (
     `<div class="cell-key">${esc(key)}</div>` +
-    `<div class="cell-state">${esc(t.state)}</div>` +
+    `<div class="cell-state">${esc(viewState(t))}</div>` +
     `<div class="cell-meta">` +
       `<span class="sh">s${String(t.shard).padStart(2, '0')}</span>` +
       `<span class="at${Number(t.attempt) > 1 ? ' retry' : ''}">a${esc(t.attempt)}</span>` +
@@ -359,10 +455,11 @@ function renderTasks(tasks) {
 
     // Swap only the state class; never rebuild className, which would clobber whichever
     // flash animation is mid-flight.
-    if (cell.dataset.state !== t.state) {
+    const vs = viewState(t);
+    if (cell.dataset.state !== vs) {
       if (cell.dataset.state) cell.classList.remove('s-' + cell.dataset.state);
-      cell.classList.add('s-' + t.state);
-      cell.dataset.state = t.state;
+      cell.classList.add('s-' + vs);
+      cell.dataset.state = vs;
     }
 
     // The fence advanced: another worker took this task over and the previous lease
@@ -379,7 +476,27 @@ function renderTasks(tasks) {
       newFences++;
       S.fenced.add(t.id);
       S.fenceFrom.set(t.id, { from: prevEpoch, to: t.lease_epoch, at: Date.now() });
-      if (!firstFenced) firstFenced = { cell: cell, task: t, from: prevEpoch };
+      // Not every fence is the interesting one, and the difference decides whether the
+      // big FENCE ADVANCED block is allowed to fire.
+      //
+      // A task parked at AWAITING_APPROVAL is re-claimed at a higher epoch the moment a
+      // human approves it. That genuinely fences the previous holder, so it belongs in
+      // the counter and it earns the cell's chip — but nothing irreversible was ever
+      // outstanding on it, and raising a 20px FENCE ADVANCED readout over it during the
+      // guided run made the approval beat look like a crash recovery. (It did, on the
+      // first run I recorded.)
+      //
+      // The dangerous fence is the one where a LIVE RECEIPT existed at the moment the
+      // task changed hands — i.e. the task was, and remains, in ACTION_PREPARED. That is
+      // the only case where an effect may already exist in the world, and it is the only
+      // case the headline block is spent on.
+      // Specifically the PREVIOUS observed state, not the current one. Reading the
+      // current state instead fired the block during the approval beat, because a task
+      // resumed after a human says yes is momentarily in ACTION_PREPARED at the higher
+      // epoch it was just re-claimed under — which looks identical to a recovery if you
+      // only look at where the task is now. Where it WAS is what settles it.
+      const overReceipt = prevState === 'ACTION_PREPARED';
+      if (overReceipt && !firstFenced) firstFenced = { cell: cell, task: t, from: prevEpoch };
       cell.classList.remove('did-fence');
       void cell.offsetWidth;           // restart the animation on a re-fence
       cell.classList.add('did-fence');
@@ -422,24 +539,78 @@ function renderTasks(tasks) {
 
     if (firstFenced) {
       const k = String(firstFenced.task.dedupe_key || '').replace(/^order:/, '').replace(/:refund$/, '');
-      // Kept under ~70 characters on purpose: the bar is one line and at 1280px the
-      // sentence that was here before was ellipsised exactly where the meaning was.
-      chaosBar('fenced', 'FENCE ADVANCED',
-        `${k} · lease_epoch e${firstFenced.from} → e${firstFenced.task.lease_epoch}` +
-        (newFences > 1 ? ` · +${newFences - 1} more` : '') +
-        ' · the old lease can no longer settle');
+      // The one-line bar stays: it is what a returning operator reads. The block below it
+      // is what a camera reads. `newFences - 1` is deliberately not reported as "more
+      // takeovers" — it is only the count of other handovers seen in the same poll.
+      chaosBar(null);
+      showFenceProof(k, firstFenced.from, firstFenced.task.lease_epoch, 0);
+      // Fire and forget: the key comparison lands a second or two after the fence, which
+      // is the right order anyway — the fence is the takeover, the key is what happened
+      // next. The guided run awaits the same helper so both paths prove it the same way.
+      verifyIdempotency(firstFenced.task.id, S.receiptKeys.get(firstFenced.task.id));
       // Bring the proof on screen. `nearest` so a fence in the visible rows does not
       // yank the grid around for no reason.
       firstFenced.cell.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      // The dismissal timer belongs to chaosBar itself now, so arriving here also cancels
-      // the ARMED timeout — a fence that lands is the answer the banner was waiting for.
     }
   }
   $('#grid-note').textContent = tasks.length + ' tasks';
+  renderStateStrip(S.mission && S.mission.by_state);
+  if (PF.running) paintProofEvidence();
+}
+
+/** The fence, at a size that survives a 720p screen recording.
+ *
+ *  The proof this whole project rests on is one integer incrementing inside one 132px
+ *  cell. It is genuinely true and it is genuinely unwatchable — so the cell keeps its
+ *  chip and its corner mark, and the fact gets restated here at 20px with the word
+ *  lease_epoch spelled out. No glow and no animation: it is a readout that appears, the
+ *  way a readout on an instrument appears.
+ *
+ *  The second row is the half of the argument the epoch does not carry. Advancing the
+ *  fence stops the dead worker from writing; it does not stop a SECOND refund. What stops
+ *  that is the recovering worker re-sending the key it found on the durable receipt
+ *  instead of minting a fresh one, so the string is printed once, in full, with both
+ *  halves of its provenance named. It is only filled in when the two keys have actually
+ *  been compared (see proofRecoverKey) — it is never asserted from the design. */
+function showFenceProof(taskKey, from, to, more) {
+  const box = $('#fenceproof');
+  box.hidden = false;
+  $('#fp-task').textContent = taskKey + (more > 0 ? '  (+' + more + ' more)' : '');
+  $('#fp-from').textContent = 'e' + from;
+  $('#fp-to').textContent = 'e' + to;
+  clearTimeout(showFenceProof.t);
+  // Long-lived on purpose. This is the artifact someone scrubs back to.
+  showFenceProof.t = setTimeout(() => { box.hidden = true; $('#fp-idem').hidden = true; }, 120000);
+}
+
+function showIdempotencyProof(key) {
+  $('#fp-key').textContent = key;
+  $('#fp-idem').hidden = false;
+}
+
+/** Compare the key the receipt was minted under against the key the recovering worker
+ *  actually settled with, and only claim IDENTICAL if they are.
+ *
+ *  `expected` came from /api/receipts/unsettled while the task was still stranded, so
+ *  this is a comparison of two independently observed strings rather than a restatement
+ *  of one. If the settle has not landed yet the task detail simply will not contain it,
+ *  hence the short retry; if it never matches, nothing is shown. Silence is the correct
+ *  output for "could not verify".
+ */
+async function verifyIdempotency(taskId, expected, tries) {
+  if (!expected) return false;
+  for (let i = 0; i < (tries || 6); i++) {
+    const d = await get('/api/tasks/' + encodeURIComponent(taskId), null);
+    const hit = d && (d.attempts || []).some(
+      (a) => a.idempotency_key === expected && a.settled_at);
+    if (hit) { showIdempotencyProof(expected); return true; }
+    await new Promise((r) => setTimeout(r, 900));
+  }
+  return false;
 }
 
 function renderLegend() {
-  $('#legend').innerHTML = TASK_STATES
+  $('#legend').innerHTML = DISPLAY_STATES
     .map((s) => `<span class="lg"><i class="mark m-${s}"></i>${esc(s)}</span>`).join('');
 }
 
@@ -504,6 +675,19 @@ function renderEvents(events) {
     if (S.seenEvents.has(key)) continue;
     S.seenEvents.add(key);
 
+    // Counted here rather than derived from lease_epoch, because those are not the same
+    // number and conflating them overstates the claim.
+    //
+    // FENCE ADVANCES counts every lease handover — which includes the perfectly ordinary
+    // case of a task parked at AWAITING_APPROVAL being re-claimed after a human says yes.
+    // Three approvals in the demo therefore add three to it, and a reader who takes that
+    // meter as "three crash takeovers" has been misled by the dashboard rather than by
+    // the data. A `task.recovered` event is unambiguous: it is only written when a worker
+    // claims a task, finds a LIVE receipt already sitting on it, and has to decide what
+    // to do about an effect that may already exist. That is the number the proof strip
+    // reports.
+    if (e.event_type === 'task.recovered') S.recoveries++;
+
     const row = document.createElement('div');
     row.className = 'ev ' + eventClass(e.event_type) + (S.booted ? ' is-new' : '');
     const trans = (e.from_state || e.to_state)
@@ -532,6 +716,12 @@ function renderAgents(agents) {
   paintAgents();
 }
 
+/** How many worker rows the rail shows. /api/agents has no LIMIT and no staleness filter,
+ *  so the pool grows by one row per dispatch and never shrinks until a reset. Forty judges
+ *  pressing two buttons each is eighty rows of history in a 234px rail that also has to
+ *  hold UNSETTLED RECEIPTS and REWIND. Newest N, then a count of the rest. */
+const WORKER_ROWS = 6;
+
 /** Painted on its own 1s timer as well as on fetch, so the age counts up smoothly
  *  between polls. A worker that has stopped heartbeating must LOOK like it is drifting
  *  away, not tick over in silent 1s steps. */
@@ -543,15 +733,33 @@ function paintAgents() {
     $('#workers-note').textContent = '0';
     return;
   }
+  // `pool`, not `all` — the map below already binds `all` for shard affinity, and having
+  // the two shadow each other is exactly the kind of thing that reads fine and breaks in
+  // six months.
+  const pool = S.agents.slice().sort((a, b) =>
+    Number(a.seconds_since_heartbeat || 0) - Number(b.seconds_since_heartbeat || 0));
+  const shown = pool.slice(0, WORKER_ROWS);
+  const hidden = pool.length - shown.length;
+
   let live = 0;
-  box.innerHTML = S.agents.map((a) => {
+  box.innerHTML = shown.map((a) => {
     const secs = Number(a.seconds_since_heartbeat || 0) + drift;
-    // Lease is 20s; a worker silent for a quarter of it is suspicious, and past the
-    // lease its tasks are claimable by anyone, which is functionally dead.
-    let cls = '', status = a.status;
-    if (a.status === 'DEAD' || secs > 20) { cls = 'is-dead'; status = 'DEAD'; }
-    else if (secs > 6) { cls = 'is-stale'; status = 'STALE'; }
-    else { live++; }
+
+    // Three outcomes, not two, and the difference is the whole point of this panel.
+    //
+    // A worker that drained its queue and exited wrote stopped_at on the way out. That is
+    // a normal, correct end and it must not be painted in the alarm colour — spending red
+    // on a process that did its job and left is what makes red stop meaning anything.
+    //
+    // A worker with no stopped_at whose heartbeat has outlived the 20s lease stopped
+    // without ever saying so. That is the exact condition the fencing token exists for,
+    // and it is the only one here that earns --alarm. The chaos worker lands in it
+    // because os._exit(9) skips every atexit hook — the same way a SIGKILL does.
+    let cls = '', status;
+    if (a.stopped_at) { cls = 'is-exited'; status = 'EXITED'; }
+    else if (secs > 20) { cls = 'is-dead'; status = 'KILLED'; }
+    else if (secs > 6) { cls = 'is-stale'; status = 'STALE'; live++; }
+    else { status = 'ALIVE'; live++; }
 
     // An empty shard list means no affinity — the worker claims from every shard.
     // See worker.py, which logs `shards=ALL` for exactly this case.
@@ -572,8 +780,9 @@ function paintAgents() {
         `</div>` +
       `</div>`
     );
-  }).join('');
-  $('#workers-note').textContent = live + '/' + S.agents.length + ' live';
+  }).join('') + (hidden > 0
+    ? `<div class="worker-more">+${hidden} earlier worker${hidden === 1 ? '' : 's'} not shown</div>` : '');
+  $('#workers-note').textContent = live + '/' + pool.length + ' live';
 }
 
 // ──────────────────────────────────────────────────────────── unsettled receipts ──
@@ -581,6 +790,15 @@ function paintAgents() {
 function renderUnsettled(rows) {
   const box = $('#unsettled');
   $('#unsettled-note').textContent = String((rows || []).length);
+
+  // Remember the key each outstanding receipt was minted under, BEFORE anything takes the
+  // task over. This is the only moment it can be captured honestly: once the recovering
+  // worker has settled, a key read off the finished attempt is just a key, and saying it
+  // is "the same one" would be an assertion rather than a comparison. Held per task and
+  // never cleared on settle, so the comparison survives the receipt leaving this list.
+  for (const r of (rows || [])) {
+    if (r.task_id && r.idempotency_key) S.receiptKeys.set(r.task_id, r.idempotency_key);
+  }
   if (!rows || !rows.length) {
     box.innerHTML = '<span class="empty">none — nothing is in flight</span>';
     return;
@@ -640,7 +858,11 @@ function renderLedger(rows) {
     '</tr></thead><tbody>' +
     rows.map((r) => {
       const dup = perOrder[r.order_ref] > 1;
-      return '<tr>' +
+      // The replayed row is the crash, in the provider's own book. Give it a rule so a
+      // judge who lands on this tab does not have to scan 18 rows for the one that
+      // matters — the one where AXIOM asked twice and the provider acted once.
+      const replayed = Number(r.replay_count) > 0;
+      return `<tr class="${replayed ? 'is-replay' : ''}">` +
         `<td class="strong">${esc(r.provider_ref)}</td>` +
         `<td class="${dup ? 'alarm' : ''}">${esc(r.order_ref)}${dup ? ' ×' + perOrder[r.order_ref] : ''}</td>` +
         `<td class="num">${esc(money(r.amount_cents))}</td>` +
@@ -766,6 +988,30 @@ async function runRecall(isRerun) {
 
 // ─────────────────────────────────────────────────────────────────── approvals ──
 
+/** What the agent is asking permission to do, as a line a human can read.
+ *
+ *  `proposed_action` is JSONB — tasks.py writes {operation, request_body} — so the
+ *  previous `a.proposed_action || a.step_name` put the string "[object Object]" at 15px
+ *  in serif at the top of every approval card. On the one screen in this product where a
+ *  person is being asked to authorise money moving, the field naming the act was
+ *  unreadable. Render the operation, and the order it is against. */
+function proposedLabel(a) {
+  const pa = a.proposed_action;
+  if (pa && typeof pa === 'object') {
+    const body = pa.request_body || {};
+    const op = pa.operation || a.step_name || 'action';
+    return body.order_ref ? op + '  ·  ' + body.order_ref : op;
+  }
+  return String(pa || a.step_name || '—');
+}
+
+/** The reason field, when the request body carries one. */
+function proposedReason(a) {
+  const pa = a.proposed_action;
+  const body = (pa && typeof pa === 'object' && pa.request_body) || {};
+  return body.reason || '';
+}
+
 function renderApprovals(rows) {
   const box = $('#approvals');
   const badge = $('#appr-badge');
@@ -791,18 +1037,18 @@ function renderApprovals(rows) {
     return (
       `<div class="appr" data-appr="${esc(a.id)}">` +
         `<div class="appr-top">` +
-          `<div class="appr-action">${esc(a.proposed_action || a.step_name)}</div>` +
+          `<div class="appr-action">${esc(proposedLabel(a))}</div>` +
           `<div class="appr-amt">${esc(money(a.proposed_amount_cents))}</div>` +
         `</div>` +
         `<div class="appr-reason">${esc(a.reason)}</div>` +
         `<div class="appr-grid">` +
           `<div class="appr-f"><span>POLICY</span><b>${esc(a.policy_id || '—')} v${esc(a.policy_version != null ? a.policy_version : '—')}</b></div>` +
-          `<div class="appr-f"><span>STEP</span><b>${esc(a.step_name || '—')}</b></div>` +
+          `<div class="appr-f"><span>STEP</span><b>${esc(a.step_name || '—')}${proposedReason(a) ? ' · ' + esc(proposedReason(a)) : ''}</b></div>` +
           `<div class="appr-f"><span>TASK</span><b>${esc(shortId(a.task_id))}</b></div>` +
           `<div class="appr-f"><span>EVIDENCE MEMORIES (${ev.length})</span><b>${ev.length ? ev.map(shortId).map(esc).join(' · ') : 'none'}</b></div>` +
         `</div>` +
         `<div class="appr-acts">` +
-          `<input class="who" value="human:ops@acme.example" data-who>` +
+          `<input class="who" value="ops@acme.example" data-who>` +
           `<button class="btn btn-approve" data-decide="1">APPROVE</button>` +
           `<button class="btn btn-reject" data-decide="0">REJECT</button>` +
           (expSecs !== null
@@ -815,7 +1061,11 @@ function renderApprovals(rows) {
 
 async function decide(card, approved) {
   const id = card.dataset.appr;
-  const who = $('[data-who]', card).value || 'human:operator';
+  // tasks.decide_approval writes actor = f'human:{decided_by}', so sending "human:ops@…"
+  // from here produced "human:human:ops@…" in the journal — on the one event that records
+  // a person taking responsibility for money moving. Send the identity, not the identity
+  // plus the prefix the server is about to add.
+  const who = $('[data-who]', card).value || 'operator';
   const btns = $$('button', card);
   btns.forEach((b) => (b.disabled = true));
   try {
@@ -845,16 +1095,24 @@ function renderCrashWindows(rows) {
     t.innerHTML = '<span class="empty">/api/crash-windows returned nothing</span>';
     return;
   }
+  // W4 is the only window this browser session can witness first-hand, and it can only
+  // claim to have witnessed it once BOTH halves are on the wire: a fence advanced (a
+  // takeover happened) and the provider recorded a replay (the same key was presented
+  // twice and it acted once). One without the other is not an observation of W4.
+  const sawW4 = S.fenceCount > 0 && S.pstats && Number(S.pstats.replays || 0) > 0;
+
   t.innerHTML = rows.map((w) => {
     const eff = String(w.effect_possible).toUpperCase();
     const key = (eff === 'YES' || eff === 'TRUE') ? 'YES'
       : ((eff === 'NO' || eff === 'FALSE') ? 'NO' : 'UNKNOWN');
+    const live = sawW4 && w.id === 'W4';
     return (
-      `<article class="cw cw-${key}">` +
+      `<article class="cw cw-${key}${live ? ' cw-live' : ''}">` +
         `<div class="cw-id">${esc(w.id)}</div>` +
         `<div class="cw-body">` +
           `<div class="cw-top">` +
             `<h4 class="cw-when">${esc(w.when)}</h4>` +
+            (live ? '<span class="cw-obs">OBSERVED IN THIS SESSION</span>' : '') +
             `<span class="eff eff-${key}">EFFECT POSSIBLE: ${esc(key)}</span>` +
           `</div>` +
           `<div class="cw-row"><span>RECOVERY</span><p>${esc(w.recovery)}</p></div>` +
@@ -864,6 +1122,107 @@ function renderCrashWindows(rows) {
       `</article>`
     );
   }).join('');
+}
+
+// ──────────────────────────────────────────────────────────── counterexample ──
+
+/** A RECORDED RUN of scripts/counterexample.py. Deliberately not live.
+ *
+ *  The script proves the thesis by letting a fair transcript-memory agent double-refund a
+ *  real order at the exact crash instant AXIOM survives. That means running it creates a
+ *  genuine duplicate refund in the provider's ledger — $600 out the door against one $300
+ *  order. A dashboard whose headline number is DUPLICATE REFUNDS must not have a button
+ *  that manufactures duplicate refunds, so this panel is a fixture and says so in its own
+ *  footer, with the command to reproduce it.
+ *
+ *  Every value below is copied from one terminal run. Provenance in `measured`.
+ *  Reproduce with:  ./.venv/bin/python scripts/counterexample.py
+ */
+const COUNTEREXAMPLE = {
+  measured: '2026-08-11 · CockroachDB v26.2.3 (local) · AXIOM_OFFLINE=1 · re-run on a '
+    + 'fully seeded database, exit 0, printed PASS',
+  command: './.venv/bin/python scripts/counterexample.py',
+  order: 'one order · $300.00 · both agents killed at the same instant (W4)',
+  // [label, baseline, axiom, class, note-under-the-axiom-cell]
+  rows: [
+    ['killed in W4', 'yes', 'yes', '', ''],
+    ['memory consulted', '2 transcript turns', 'receipt + 5 recalled memories', '', ''],
+    ['policy gate', 'none — refunds $300 unattended', 'stopped and asked a human first', '', ''],
+    ['recovery decision', 'retry — cannot know if it landed', 'RESEND under the same key', '', ''],
+    ['idempotency key', 'newly generated each attempt', 'axm_79f90ba205cf427918ae7e…', '',
+      'a new key on every attempt is what makes the provider treat the second call as a '
+      + 'second refund; the whole difference is in this row'],
+    ['fence (lease_epoch)', 'n/a — no such concept', '2 → 3', '',
+      'starts at 2, not 1, because this script claims the task, gets stopped by the policy '
+      + 'gate, and re-claims after the operator approves — then the crash takeover makes it 3'],
+  ],
+  totals: [
+    ['REFUNDS CREATED', '2', '1', 'bad', ''],
+    ['IDEMPOTENT REPLAYS', '0', '1', 'good', ''],
+    ['DOLLARS OUT', '$600.00', '$300.00', 'money', ''],
+  ],
+  reasoning: {
+    baseline: 'transcript shows an unfinished refund intent with no completion; cannot tell '
+      + 'whether the call landed, so retrying',
+    axiom: 'live receipt axm_79f90ba205cf427918ae7ea05fac778c5ed63d34a607d6ad exists; '
+      + 're-dispatching under the same key (5 comparable recoveries recalled, none adverse)',
+  },
+  verdict: 'The customer was overcharged $300.00 by the baseline and $0.00 by AXIOM.',
+};
+
+/** The comparison, rendered once. Static by design — nothing here polls. */
+function renderCounterexample() {
+  const c = COUNTEREXAMPLE;
+  const row = (r, big) =>
+    `<tr class="${big ? 'ce-total ce-' + r[3] : ''}">` +
+      `<td class="ce-k">${esc(r[0])}</td>` +
+      `<td class="ce-a">${esc(r[1])}</td>` +
+      `<td class="ce-b">${esc(r[2])}` +
+        (r[4] ? `<div class="ce-note">${esc(r[4])}</div>` : '') +
+      `</td>` +
+    `</tr>`;
+
+  $('#counter-out').innerHTML =
+    `<div class="ce">` +
+
+      `<p class="ce-lede">A transcript-memory agent is the honest competition, so this runs
+        one against the same provider, the same order, the same $300 and the same crash —
+        and it is <em>not</em> a strawman. It fsyncs its transcript, re-reads it on restart,
+        and records its intent before it acts. It still refunds twice, because after the
+        crash its memory cannot distinguish <em>the call never went out</em> from <em>the
+        call went out and I died</em>, and it has no durable receipt to recover the original
+        idempotency key from.</p>` +
+
+      `<div class="ce-setup"><span class="lbl">SETUP</span>${esc(c.order)}</div>` +
+
+      `<table class="ce-tbl">` +
+        `<thead><tr><th></th>` +
+          `<th class="ce-h ce-h-a">TRANSCRIPT MEMORY<span>the fair baseline</span></th>` +
+          `<th class="ce-h ce-h-b">AXIOM<span>execution memory</span></th>` +
+        `</tr></thead><tbody>` +
+        c.rows.map((r) => row(r, false)).join('') +
+        c.totals.map((r) => row(r, true)).join('') +
+      `</tbody></table>` +
+
+      `<div class="ce-say">` +
+        `<div class="ce-q"><span class="lbl">BASELINE REASONING</span><p>${esc(c.reasoning.baseline)}</p></div>` +
+        `<div class="ce-q ce-q-b"><span class="lbl">AXIOM RATIONALE</span><p>${esc(c.reasoning.axiom)}</p></div>` +
+      `</div>` +
+
+      `<p class="ce-verdict">${esc(c.verdict)}</p>` +
+
+      `<div class="ce-prov">` +
+        `<div><span class="lbl">WHY THIS PANEL IS NOT LIVE</span>` +
+          `<p>Running the baseline creates a real duplicate refund in the provider's ledger —
+            that is the point of it. A dashboard whose headline reads DUPLICATE REFUNDS 0
+            does not get a button that manufactures duplicate refunds. So this is a
+            recorded run, and this paragraph is here so nobody has to wonder.</p></div>` +
+        `<div><span class="lbl">PROVENANCE</span>` +
+          `<p>${esc(c.measured)}</p>` +
+          `<pre class="json">${esc(c.command)}</pre></div>` +
+      `</div>` +
+
+    `</div>`;
 }
 
 // ────────────────────────────────────────────────────────────────────── drawer ──
@@ -928,7 +1287,7 @@ function closeDrawer(fromHash) {
 
 // ─────────────────────────────────────────────────────────────────────── views ──
 
-const VIEWS = ['ops', 'ledger', 'memory', 'approvals', 'spec'];
+const VIEWS = ['ops', 'ledger', 'memory', 'approvals', 'spec', 'counter'];
 
 /** The tab lives in the hash so a reload keeps its place and a demo can deep-link
  *  straight to, say, #spec without four seconds of clicking on camera. `#task/<uuid>`
@@ -970,7 +1329,7 @@ async function tickView() {
   else if (v === 'spec') {
     if (!S.crashWindows) S.crashWindows = await get('/api/crash-windows', []);
     renderCrashWindows(S.crashWindows);
-  }
+  } else if (v === 'counter') renderCounterexample();
 }
 
 // ──────────────────────────────────────────────────────────────────── polling ──
@@ -1006,15 +1365,41 @@ async function aux() {
   else if (S.view !== 'ops') tickView();
 }
 
+/** Hold the poll across a destructive demo call.
+ *
+ *  /api/demo/seed {reset:true} truncates and re-inserts, and there is a window inside it
+ *  where the tenant genuinely has zero tasks. The API's demo self-heal treats an empty
+ *  /api/tasks as "this demo is broken, rebuild it" — so a poll landing in that window
+ *  makes the server create a SECOND mission alongside the one the seed is in the middle
+ *  of writing. Everything downstream then looks wrong in a way that is very hard to read:
+ *  the newest mission is the healed one, the workers claim tasks from the other, and the
+ *  mission-scoped provider ledger comes back empty under a board of SUCCEEDED tasks.
+ *
+ *  Observed, not theorised: `axiom.demo :: self-healed the demo ... (mission 74701eca)`
+ *  in the API log at the exact second a guided run pressed seed, and that run ended with
+ *  an empty ledger and no crash. The race is in the server and is reported separately;
+ *  this is the half of it this page is responsible for, which is not issuing the read
+ *  that trips it.
+ */
+async function withPollHeld(fn) {
+  P.frozen = true;
+  clearTimeout(P.timer); P.timer = null;
+  try {
+    return await fn();
+  } finally {
+    P.frozen = false;
+  }
+}
+
 async function tick() {
-  if (P.busy || document.hidden) return;
+  if (P.busy || P.frozen || document.hidden) return;
   P.busy = true;
   P.lastTick = Date.now();
   const before = apiFailures;
   try {
     S.changed = false;
     const [mission, tasks, events] = await Promise.all([
-      get('/api/mission', null),
+      getMission(),
       get('/api/tasks?limit=300', null),
       get('/api/events?limit=60', null),
     ]);
@@ -1099,7 +1484,10 @@ function wire() {
 
   document.addEventListener('keydown', (e) => {
     if (e.target.matches('input, select, textarea')) return;
-    const map = { '1': 'ops', '2': 'ledger', '3': 'memory', '4': 'approvals', '5': 'spec' };
+    if (e.key === 'Escape' && !$('#brief').hidden) { closeBrief(); return; }
+    if (e.key === 'b' || e.key === 'B' || e.key === '?') { openBrief(); return; }
+    const map = { '1': 'ops', '2': 'ledger', '3': 'memory', '4': 'approvals',
+                  '5': 'spec', '6': 'counter' };
     if (map[e.key]) setView(map[e.key]);
     if (e.key === 'Escape') closeDrawer();
   });
@@ -1131,7 +1519,7 @@ function wire() {
     b.disabled = true;
     try {
       await post(`/api/memories/${encodeURIComponent(b.dataset.quarantine)}/quarantine`,
-        { reason: 'quarantined by operator in Mission Control', by: 'human:ops@acme.example' });
+        { reason: 'quarantined by operator in Mission Control', by: 'ops@acme.example' });
       toast('quarantined · ' + shortId(b.dataset.quarantine) + ' — re-running recall');
       await tickView();
       if (S.lastRecall) await runRecall(true);
@@ -1149,20 +1537,36 @@ function wire() {
 
   $('#btn-seed').addEventListener('click', async () => {
     const b = $('#btn-seed'); b.disabled = true;
-    try { const r = await post('/api/demo/seed', { tasks: 30, reset: true }); toast('seeded ' + r.tasks + ' tasks'); resetClientState(); }
+    try {
+      const r = await withPollHeld(() => post('/api/demo/seed', { tasks: 30, reset: true }));
+      toast('seeded ' + r.tasks + ' tasks'); resetClientState();
+    }
     catch (e) { toast('seed failed: ' + e.message, true); }
     finally { b.disabled = false; nudge(); run(); }
   });
 
   $('#btn-reset').addEventListener('click', async () => {
     const b = $('#btn-reset'); b.disabled = true;
-    try { await post('/api/demo/reset', {}); toast('demo state cleared'); resetClientState(); }
+    try {
+      await withPollHeld(() => post('/api/demo/reset', {}));
+      toast('demo state cleared'); resetClientState();
+    }
     catch (e) { toast('reset failed: ' + e.message, true); }
     finally { b.disabled = false; nudge(); run(); }
   });
 
   $('#btn-run').addEventListener('click', () => runWorker('drain'));
   $('#btn-kill').addEventListener('click', () => runWorker('chaos'));
+
+  $('#btn-proof').addEventListener('click', runProof);
+  $('#pf-stop').addEventListener('click', () => { PF.abort = true; });
+
+  $('#btn-brief').addEventListener('click', openBrief);
+  $('#brief-x').addEventListener('click', closeBrief);
+  $('#brief-skip').addEventListener('click', closeBrief);
+  $('#brief-go').addEventListener('click', () => { closeBrief(); runProof(); });
+  // Click the scrim to dismiss; clicks inside the card must not.
+  $('#brief').addEventListener('click', (e) => { if (e.target.id === 'brief') closeBrief(); });
 }
 
 /** POST /api/demo/run-worker.
@@ -1185,8 +1589,16 @@ async function runWorker(mode) {
     const where = r.backend === 'lambda' ? 'lambda ' + (r.function || '') : 'local pid ' + r.pid;
     if (mode === 'chaos') {
       S.chaosAt = Date.now();
-      chaosBar('armed', 'CHAOS WORKER DISPATCHED',
-        'it dies mid-refund (W4) · watch for lease_epoch to advance');
+      // A takeover needs somebody left alive to take over. On a freshly seeded board the
+      // chaos worker is the only process running, so "watch for lease_epoch to advance"
+      // is an instruction the operator cannot follow — the epoch will sit at e1 forever
+      // and the demo looks hung when it is in fact correct. Say which button is missing.
+      const others = (S.agents || []).filter(
+        (a) => !a.stopped_at && Number(a.seconds_since_heartbeat || 0) <= 20).length;
+      chaosBar('armed', 'CHAOS WORKER DISPATCHED', others > 0
+        ? 'it dies mid-refund (W4) · watch for lease_epoch to advance'
+        : 'it dies mid-refund (W4) · nothing else is running — press RUN MISSION to '
+          + 'dispatch the worker that takes the lease over');
       toast('chaos worker dispatched · ' + where);
     } else {
       toast('worker dispatched · ' + where);
@@ -1203,12 +1615,398 @@ async function runWorker(mode) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════ THE GUIDED PROOF ══
+//
+// One button that walks a stranger through the entire argument in about forty seconds,
+// live, against the same API every other panel on this page reads.
+//
+// Three rules govern everything below, and they are the reason it is written as a state
+// machine over observed API responses rather than as a timeline of setTimeouts:
+//
+//   1. IT NARRATES ONLY WHAT IT HAS SEEN. Every beat waits for the evidence in an API
+//      response — an unsettled receipt row, a lease_epoch that actually incremented, a
+//      replay counter on the provider's own ledger — and if that evidence does not arrive
+//      inside the timeout, the step says so in those words and the run continues to the
+//      verdict with the failure on screen. A guided demo that asserts a beat it did not
+//      observe is worse than no guided demo, because the one claim this project makes is
+//      that systems should tell the truth about what they have done.
+//
+//   2. IT DRIVES NOTHING IT COULD NOT DRIVE BY HAND. Every action is a POST that already
+//      has a button in the header. Nothing here reaches into the database, nothing fakes
+//      a state, and the recovery in particular is watched rather than caused — no request
+//      from this page tells the surviving worker to take the lease over.
+//
+//   3. IT IS INTERRUPTIBLE. STOP is checked between every await. The page is left in a
+//      real state, because it was only ever in real states.
+//
+// The order of the steps is dictated by the engine, not by the story. The chaos worker
+// has to run FIRST, while the queue still has claimable work — pressing KILL A WORKER on
+// a drained board dispatches a worker with nothing to claim, which is the observed reason
+// the old flow could sit narrating a crash that was never coming. And the recovery cannot
+// be hurried: the stranded task is unclaimable until its 20-second lease lapses, and that
+// interval IS the fence, so the run spends it saying so with a countdown instead of
+// pretending it is not there.
+
+/** Kept short enough to survive the rail, which gives each step about a seventh of the
+ *  window. The sentence-length version of each beat is the narration line. */
+const PROOF_STEPS = [
+  ['SEED THE BOARD',        'seed'],
+  ['CRASH MID-REFUND',      'crash'],
+  ['THE MISSION RUNS',      'work'],
+  ['A HUMAN AUTHORIZES',    'auth'],
+  ['WAIT OUT THE LEASE',    'fence'],
+  ['RECOVER, SAME KEY',     'recover'],
+  ['THE PROVIDER LEDGER',   'verdict'],
+];
+
+const PF = {
+  running: false,
+  abort: false,
+  i: -1,
+  stranded: null,     // {id, key, idem, amount, epoch, available_at} captured at the crash
+  failed: false,
+};
+
+const pfSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Every await in the run passes through here so STOP is honoured promptly. */
+function pfCheck() { if (PF.abort) throw new Error('__stopped__'); }
+
+async function pfWait(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { pfCheck(); await pfSleep(Math.min(120, end - Date.now())); }
+}
+
+/** Poll `probe` until it returns a truthy value or the budget runs out.
+ *  Returns the value, or null on timeout — the caller decides what to say about that. */
+async function pfUntil(probe, budgetMs, everyMs, onTick) {
+  const end = Date.now() + budgetMs;
+  while (Date.now() < end) {
+    pfCheck();
+    const v = await probe();
+    if (v) return v;
+    if (onTick) onTick(Math.max(0, end - Date.now()));
+    await pfSleep(everyMs || 500);
+  }
+  return null;
+}
+
+function pfRail() {
+  $('#pf-rail').innerHTML = PROOF_STEPS.map((s, i) => {
+    const cls = i < PF.i ? 'is-done' : (i === PF.i ? 'is-now' : '');
+    return `<li class="pfs ${cls}"><b>${i + 1}</b><span>${esc(s[0])}</span></li>`;
+  }).join('');
+}
+
+function pfStep(i) {
+  PF.i = i;
+  $('#pf-n').textContent = (i + 1) + '/' + PROOF_STEPS.length;
+  $('#pf-step').textContent = PROOF_STEPS[i][0];
+  pfRail();
+}
+
+/** The narration line. `tone` is '', 'hot' (something irreversible is outstanding) or
+ *  'miss' (the beat did not happen — said plainly, never dressed up). */
+function pfSay(text, tone) {
+  const el = $('#pf-say');
+  el.textContent = text;
+  el.className = 'pf-say' + (tone ? ' is-' + tone : '');
+}
+
+function paintProofEvidence() {
+  const p = S.pstats || {};
+  $('#pf-fence').textContent = String(S.recoveries || 0);
+  $('#pf-replay').textContent = String(p.replays != null ? p.replays : 0);
+  const d = Number(p.duplicate_orders || 0);
+  $('#pf-dupe').textContent = String(d);
+  $('#pf-dupe-box').classList.toggle('is-alarm', d > 0);
+}
+
+/** Force one full poll cycle now, at the fast rung, so the grid and the journal are
+ *  showing the same instant the narration is describing. */
+async function pfRefresh() {
+  P.rung = 0; P.idle = 0;
+  clearTimeout(P.timer); P.timer = null;
+  await tick();
+  schedule();
+}
+
+// ─────────────────────────────────────────────────────────────────── the steps ──
+
+async function stepSeed() {
+  pfStep(0);
+  pfSay('rebuilding the world — order exceptions, one budget authority, prior memories');
+  const r = await withPollHeld(() => post('/api/demo/seed', { tasks: 30, reset: true }));
+  resetClientState();
+  await pfRefresh();
+  // Read the counts back off the response and the mission rather than restating the
+  // numbers the seed happened to use when this was written. seed.py's budget has already
+  // moved once ($1,500 -> $2,500) and a narration that hardcodes it is a lie waiting for
+  // the next commit.
+  const budget = S.mission ? money(S.mission.budget_cents) : '—';
+  pfSay(`${r.tasks} tasks READY against ${budget} of budget authority, ${r.memories} prior `
+      + "memories. Nothing has run. The payment provider's ledger is empty.");
+  await pfWait(1800);
+}
+
+async function stepCrash() {
+  pfStep(1);
+  setView('ops');
+  pfSay('dispatching a worker that will die at crash window W4 — after the provider commits '
+      + 'the refund, before AXIOM records it');
+
+  // The evidence that W4 was actually entered: a receipt that is DISPATCHED and not
+  // settled. That row is the system admitting an effect may exist that it has not
+  // recorded — which is the only honest thing it can say at this instant.
+  //
+  // Two attempts, because a chaos worker only dies once it reaches a refund, and roughly
+  // a fifth of the seeded exceptions are reship/escalate cases that move no money. A
+  // worker that happens to draw only those drains them and exits cleanly, having proved
+  // nothing — correct behaviour, and not a reason to fail the run. Retrying is honest
+  // (it is the same button pressed twice); inventing the crash would not be.
+  let receipt = null;
+  for (let attempt = 0; attempt < 2 && !receipt; attempt++) {
+    if (attempt) {
+      // Two things can leave a chaos worker with no refund to die on: it drew only the
+      // reship/escalate cases, or the queue was emptied out from under it by something
+      // else claiming from this tenant. Re-seeding covers both, and it is the same SEED
+      // the header button posts — the retry does nothing a person could not do by hand.
+      pfSay('that worker found no refund to die on. Re-seeding and dispatching another.', 'miss');
+      await withPollHeld(() => post('/api/demo/seed', { tasks: 30, reset: true }));
+      resetClientState();
+      await pfRefresh();
+    }
+    await post('/api/demo/run-worker', { mode: 'chaos' });
+    receipt = await pfUntil(async () => {
+      const rows = await get('/api/receipts/unsettled', []);
+      await pfRefresh();
+      return rows && rows.length ? rows[0] : null;
+    }, 20000, 700);
+  }
+
+  if (!receipt) {
+    PF.failed = true;
+    pfSay('no unsettled receipt appeared after two chaos workers — W4 was not entered. '
+        + 'Not claiming a crash that did not happen.', 'miss');
+    await pfWait(3000);
+    return;
+  }
+
+  const task = S.tasks.find((t) => t.id === receipt.task_id);
+  // Also record it where the fence handler looks, so the key comparison is driven by the
+  // same captured-before-the-crash string on both the guided and the manual path.
+  S.receiptKeys.set(receipt.task_id, receipt.idempotency_key);
+  PF.stranded = {
+    id: receipt.task_id,
+    key: task ? String(task.dedupe_key || '').replace(/^order:/, '').replace(/:refund$/, '') : '—',
+    idem: receipt.idempotency_key,
+    amount: receipt.amount_cents,
+    epoch: task ? Number(task.lease_epoch) : 1,
+    available_at: task ? task.available_at : null,
+  };
+  pfSay(`${money(receipt.amount_cents)} has left the building under key ${receipt.idempotency_key.slice(0, 18)}… `
+      + `— and the worker that sent it is gone. ${PF.stranded.key} is stranded in ACTION_PREPARED.`, 'hot');
+  await pfWait(4200);
+}
+
+async function stepWork() {
+  pfStep(2);
+  pfSay('the other 29 exceptions proceed. The stranded task cannot be touched by anyone — '
+      + 'its lease has to lapse first.');
+  await post('/api/demo/run-worker', { mode: 'drain' });
+
+  await pfUntil(async () => {
+    await pfRefresh();
+    const busy = S.tasks.filter((t) => t.state === 'READY' || t.state === 'LEASED').length;
+    return busy === 0 ? true : null;
+  }, 25000, 600);
+
+  const n = (s) => S.tasks.filter((t) => viewState(t) === s).length;
+  pfSay(`${n('SUCCEEDED')} settled · ${n('AWAITING_APPROVAL')} stopped for a human · `
+      + `${n('ESCALATED')} escalated with no money moved · 1 stranded mid-refund`);
+  await pfWait(2600);
+}
+
+async function stepAuthorize() {
+  pfStep(3);
+  setView('approvals');
+  const pending = await get('/api/approvals', []);
+  if (!pending.length) {
+    pfSay('nothing is waiting on a human this run — skipping the authority beat', 'miss');
+    await pfWait(2000);
+    return;
+  }
+  pfSay(`${pending.length} refunds exceeded the $200 unattended ceiling. Procedural memory did `
+      + 'not advise — it refused. Execution is blocked until a human decides.');
+  await pfWait(4200);
+
+  for (const a of pending) {
+    pfCheck();
+    await post(`/api/approvals/${encodeURIComponent(a.id)}/decide`,
+      { approved: true, decided_by: 'ops@acme.example',
+        note: 'authorized during the guided proof' });
+  }
+  pfSay(`authorized by human:ops@acme.example — the decision is written into the same journal `
+      + 'as the execution, with the policy version it overrode');
+  await post('/api/demo/run-worker', { mode: 'drain' });
+  await pfUntil(async () => {
+    await pfRefresh();
+    return S.tasks.some((t) => t.state === 'AWAITING_APPROVAL') ? null : true;
+  }, 20000, 600);
+  setView('ops');
+  await pfWait(1200);
+}
+
+async function stepFence() {
+  pfStep(4);
+  if (!PF.stranded) { pfSay('nothing is stranded — no lease to wait out', 'miss'); await pfWait(1500); return; }
+
+  // available_at is re-read from the task list each cycle rather than pinned once. The
+  // value captured at the crash can be null if the poll had not yet seen the task, and a
+  // null there silently collapsed this step to zero — which then dispatched the recovery
+  // worker before the lease had lapsed, so it had nothing to claim and the fence never
+  // landed. Read it live; the lease is the server's fact, not ours.
+  await pfUntil(async () => {
+    const t = S.tasks.find((x) => x.id === PF.stranded.id);
+    const at = (t && t.available_at) || PF.stranded.available_at;
+    if (!at) return true;                       // genuinely unknown — do not stall the run
+    const left = Math.ceil((new Date(at).getTime() - Date.now()) / 1000);
+    if (left <= 0) return true;
+    pfSay(`the worker that died still holds the lease on ${PF.stranded.key}. No other worker may `
+        + `touch it for ${left}s. That interval is the fence.`, 'hot');
+    return null;
+  }, 40000, 250);
+  pfSay('the lease has lapsed. The task is claimable again — and the receipt is still there.');
+  await pfWait(1500);
+}
+
+async function stepRecover() {
+  pfStep(5);
+  if (!PF.stranded) { pfSay('nothing to recover', 'miss'); await pfWait(1200); return; }
+  pfSay('dispatching a fresh worker. Watch lease_epoch on ' + PF.stranded.key + '.');
+  await post('/api/demo/run-worker', { mode: 'drain' });
+
+  const done = await pfUntil(async () => {
+    await pfRefresh();
+    const t = S.tasks.find((x) => x.id === PF.stranded.id);
+    return (t && Number(t.lease_epoch) > PF.stranded.epoch) ? t : null;
+  }, 30000, 600);
+
+  if (!done) {
+    PF.failed = true;
+    pfSay('lease_epoch did not advance within 30s. The takeover was not observed, so it is '
+        + 'not being claimed.', 'miss');
+    await pfWait(3000);
+    return;
+  }
+
+  // The other half of the proof, and the half the epoch does not carry. Advancing the
+  // fence stops the dead worker writing; it does not stop a SECOND refund. What stops
+  // that is the recovering worker re-sending the key it recovered from the receipt — so
+  // compare the string captured before the crash against the one on the settled attempt.
+  if (await verifyIdempotency(PF.stranded.id, PF.stranded.idem)) {
+    pfSay(`fence advanced e${PF.stranded.epoch} → e${done.lease_epoch}. The receipt was recovered `
+        + 'and re-sent under the identical key — not a new one.');
+  } else {
+    pfSay(`fence advanced e${PF.stranded.epoch} → e${done.lease_epoch}, but the settled receipt did `
+        + 'not carry the original key. Reporting that as-is.', 'miss');
+  }
+  await pfWait(4200);
+}
+
+async function stepVerdict() {
+  pfStep(6);
+  setView('ledger');
+  await pfRefresh();
+  const p = await get('/api/provider/stats', null) || {};
+  renderProviderStats(p);
+  renderLedger(await get('/api/provider/ledger?limit=100', []));
+
+  // The ledger is in the provider's own order (newest first) and it is NOT reordered to
+  // suit the argument — putting the interesting row at the top would be exactly the kind
+  // of arrangement this project exists to complain about. Instead, scroll to it. It is
+  // one row out of eighteen and it is the only one that matters here.
+  const hit = $('#ledger-tbl tr.is-replay');
+  if (hit) hit.scrollIntoView({ block: 'center', behavior: 'smooth' });
+
+  const replays = Number(p.replays || 0);
+  const dupes = Number(p.duplicate_orders || 0);
+  if (dupes === 0 && replays > 0) {
+    pfSay(`${p.refunds} refunds, ${replays} idempotent replay${replays === 1 ? '' : 's'}, `
+        + `${dupes} duplicate orders — in the provider's ledger, which shares no transaction `
+        + 'with AXIOM. Effectively-once, via receipts. Never exactly-once.');
+  } else if (replays === 0) {
+    pfSay(`${dupes} duplicates, but 0 replays — the crash window was not exercised, so this run `
+        + 'proves nothing. Press RUN THE PROOF again.', 'miss');
+  } else {
+    pfSay(`${dupes} duplicate order${dupes === 1 ? '' : 's'} in the provider ledger. That is a `
+        + 'failure and it is being reported as one.', 'miss');
+  }
+  pfRail();
+}
+
+async function runProof() {
+  if (PF.running) return;
+  PF.running = true; PF.abort = false; PF.failed = false; PF.stranded = null;
+  $('#proof').hidden = false;
+  $('#btn-proof').disabled = true;
+  $('#btn-proof').textContent = 'PROOF RUNNING';
+  paintProofEvidence();
+  try {
+    await stepSeed();
+    await stepCrash();
+    await stepWork();
+    await stepAuthorize();
+    await stepFence();
+    await stepRecover();
+    await stepVerdict();
+    PF.i = PROOF_STEPS.length;      // every tick filled in
+    pfRail();
+  } catch (e) {
+    if (e && e.message === '__stopped__') {
+      pfSay('stopped. The board is left exactly as it was — nothing here was staged.');
+      pfRail();
+    } else {
+      pfSay('the run failed: ' + (e && e.message ? e.message : String(e)), 'miss');
+      toast('guided proof failed: ' + (e && e.message), true);
+    }
+  } finally {
+    PF.running = false;
+    $('#btn-proof').disabled = false;
+    $('#btn-proof').textContent = 'RUN THE PROOF';
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════ BRIEFING ══
+
+const BRIEF_KEY = 'axiom.brief.seen.v1';
+
+function openBrief() {
+  $('#brief').hidden = false;
+  $('#brief-x').focus();
+}
+function closeBrief() {
+  $('#brief').hidden = true;
+  try { localStorage.setItem(BRIEF_KEY, '1'); } catch (e) { /* private mode */ }
+}
+function maybeOpenBriefOnBoot() {
+  let seen = false;
+  try { seen = localStorage.getItem(BRIEF_KEY) === '1'; } catch (e) { /* private mode */ }
+  // A hash deep-link is somebody who already knows where they are going; do not stand in
+  // front of it.
+  if (!seen && !location.hash) openBrief();
+}
+
 function resetClientState() {
   S.epochs.clear(); S.states.clear(); S.fenced.clear(); S.fenceFrom.clear(); S.fenceCount = 0;
   S.seenEvents.clear(); S.lastRecall = null; S.chaosAt = 0; S.missionSig = '';
+  S.recoveries = 0; S.receiptKeys.clear();
   $('#taskgrid').innerHTML = ''; $('#events').innerHTML = '';
   $('#fence-count').textContent = '0';
   chaosBar(null);
+  clearTimeout(showFenceProof.t);
+  $('#fenceproof').hidden = true;
+  $('#fp-idem').hidden = true;
 }
 
 function boot() {
@@ -1237,6 +2035,7 @@ function boot() {
 
   paintPoll();
   tickView();
+  maybeOpenBriefOnBoot();
   run();
 }
 

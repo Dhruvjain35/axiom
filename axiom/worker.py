@@ -257,7 +257,11 @@ class Worker:
             return
 
         verb = 'REPLAYED' if result.replayed else 'CREATED'
-        outcome = Outcome.RESOLVED if (first_try or result.replayed) else Outcome.RESOLVED
+        # Every path that reaches here ended with exactly one real effect, whether this
+        # worker created it or the provider replayed one an earlier worker had already
+        # caused — so the outcome is RESOLVED either way. This was written as a ternary
+        # whose branches were identical, which read like a decision and was not one.
+        outcome = Outcome.RESOLVED
         content = (
             f'{situation} | recovered={not first_try} | provider {verb} '
             f'{result.provider_ref} for {receipt.amount_cents} cents under key '
