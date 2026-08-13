@@ -937,19 +937,52 @@ def _invoke(spec: _Spec, fn: Callable[..., Any], args: tuple, kwargs: dict) -> G
             rct, recovered = plan.receipt, True
 
     if rct is None:
-        approval_id = _risk_gate(b, spec, claimed, agent_id, amount_cents, key_values,
-                                 risk)
-        if approval_id is not None:
-            raise ApprovalRequired(
-                f'{spec.action} on {dedupe} needs a human: policy {b.policy_id} does not '
-                f'authorize this unattended ({risk})',
-                approval_id=approval_id, task_id=task_id)
+        # NO SEPARATE RISK GATE HERE.
+        #
+        # The adapter used to make its own authority decision before calling prepare().
+        # Two problems, and the second is the serious one:
+        #
+        #   1. Two deciders, two vocabularies. The adapter checked a Risk descriptor while
+        #      prepare() checked an int, so a @guard(risk=data.subjects=50) could pass one
+        #      and fail the other.
+        #   2. TWO CONSUMERS OF ONE SINGLE-USE TOKEN. The gate burned the human's approval
+        #      and then prepare() tried to burn it again, found it spent, and parked the
+        #      act a second time — so an approved action could never proceed. An approval
+        #      is a capability; two independent readers of it is a bug by construction.
+        #
+        # prepare() now takes the risk descriptor, so it is the single place that decides
+        # whether an irreversible act may happen unattended — which is where that decision
+        # belongs anyway: inside the transaction that mints the receipt.
+        #
+        # The gate survives for the LABEL form only. A plain string like 'data_deletion'
+        # is matched against a vocabulary in the policy body; prepare() knows nothing
+        # about that, so something has to. Exactly one of the two fires per call, because
+        # a guard declares either a descriptor or a label and never both — which is what
+        # keeps the single-use approval token to a single consumer.
+        if risk is not None and not (risk_mod is not None
+                                     and isinstance(risk, risk_mod.Risk)):
+            approval_id = _risk_gate(b, spec, claimed, agent_id, amount_cents,
+                                     key_values, risk)
+            if approval_id is not None:
+                raise ApprovalRequired(
+                    f'{spec.action} on {dedupe} needs a human: policy {b.policy_id} does '
+                    f'not authorize this unattended ({risk})',
+                    approval_id=approval_id, task_id=task_id)
         try:
             prepared = db.tx(lambda cur: tasks.prepare(
                 cur, task=claimed, agent_id=agent_id, step_name=spec.action,
                 provider_name=spec.provider, operation=spec.operation,
                 request_body={'action': spec.action, 'key': key_values,
                               'amount_cents': amount_cents, 'currency': spec.currency},
+                # Hand prepare() the risk descriptor the caller declared, so the policy
+                # decides in the units the ACTION is measured in. Before prepare() took a
+                # Risk, the adapter computed one, checked it itself, and then passed an
+                # int — so a @guard(risk=data.subjects=50) still reached the authority
+                # transaction as "50 cents", and a policy granting data.subjects refused
+                # it. Two places deciding the same question in different vocabularies is
+                # how they end up disagreeing.
+                risk=risk if (risk_mod is not None
+                              and isinstance(risk, risk_mod.Risk)) else None,
                 amount_cents=amount_cents, currency=spec.currency,
                 policy_id=b.policy_id))
         except BudgetExceeded:

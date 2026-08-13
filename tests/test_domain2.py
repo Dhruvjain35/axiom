@@ -121,7 +121,15 @@ class BWorld:
         return db.tx(lambda cur: tasks.prepare(
             cur, task=claimed, agent_id=agent_id, step_name=STEP,
             provider_name=DOMAIN.provider_name, operation=DOMAIN.operation,
-            request_body=body, amount_cents=intent.risk_units,
+            request_body=body,
+            # Ask in RECIPIENTS. This passed only amount_cents until prepare() learned to
+            # take a risk descriptor, which meant the decision that gated a send reached
+            # the policy through the money bridge — the thing domains/__init__ called "a
+            # column-naming lie". A policy that grants recipients now correctly refuses to
+            # authorize money, so a caller that still asks in dollars gets parked, and
+            # this helper asking properly is what makes these tests test the real path.
+            risk=DOMAIN.risk.descriptor(intent.risk_units, intent.reason),
+            amount_cents=intent.risk_units,
             currency=DOMAIN.risk.code, policy_id=POLICY_ID))
 
     def recover(self, claimed: tasks.Claimed, agent_id: uuid.UUID,
@@ -211,10 +219,10 @@ def _create(budget_recipients: int, ceiling_recipients: int,
             # The clause that says what it means (db/004_risk.sql)...
             risk_grants=[Grant(COMMS_RECIPIENTS, ceiling_recipients,
                                Reversibility.IRREVERSIBLE)],
-            # ...and the same number in the money column, because tasks.prepare() still
-            # passes an int and the decision reaches the general model through the money
-            # bridge. Both are asserted to agree by
-            # test_the_policy_says_the_same_thing_in_both_vocabularies.
+            # ...and the same number in the money column. It no longer DECIDES anything —
+            # prepare() asks in recipients now — but it is kept equal so that
+            # test_the_policy_says_the_same_thing_in_both_vocabularies still has two
+            # vocabularies to compare, and so a pre-004 reader of this row is not misled.
             max_auto_action_cents=ceiling_recipients, requires_approval=requires_approval,
             created_by='human:test@axiom.invalid', activate=True)
         return tasks.create_mission(
@@ -367,20 +375,33 @@ def test_the_measurer_sizes_a_send_from_the_request_body():
 
 
 def test_the_policy_says_the_same_thing_in_both_vocabularies(bworld: BWorld):
-    """The recipients grant and the money bridge must agree, or the demo is a coincidence.
+    """A recipients policy decides about recipients — and refuses to decide about money.
 
-    Today tasks.prepare() passes an int, so the decision that actually gates a send comes
-    from `Policy.authorizes(amount_cents)` reading the magnitude as money. The policy also
-    carries the honest clause — comms.recipients <= ceiling when IRREVERSIBLE — and this
-    test pins the two together so the day prepare() passes a Risk, nothing changes.
+    This test used to assert the opposite of its second half. It pinned
+    `pol.authorizes(1000) is True` — an INT, which the model reads as money.usd_cents —
+    on a policy whose only grant is comms.recipients, and called that "the two
+    vocabularies agreeing". They were not agreeing; a money grant was being injected into
+    every policy behind the decision, so money was the one unit that could never be
+    ungoverned. A policy that had never said a word about dollars self-authorized
+    irreversible dollar movement up to a ceiling it had inherited by accident.
+
+    Now `effective_grants` synthesizes the money ceiling ONLY for policies that state no
+    grants at all — every pre-004 row, which must keep deciding exactly as it did. A
+    policy fluent in the general vocabulary is taken at its word, including its silences.
     """
     pol = db.tx(lambda cur: policy_mod.active(
         cur, tenant_id=bworld.tenant_id, policy_id=POLICY_ID))
 
     over, under = 4_600, 1_000
-    assert pol.authorizes(over) is False and pol.authorizes(under) is True
+    # In its own unit it decides, both ways.
     assert pol.decide(DOMAIN.risk.descriptor(over)).authorized is False
     assert pol.decide(DOMAIN.risk.descriptor(under)).authorized is True
+
+    # Asked in DOLLARS, this policy has no opinion — and no opinion is a refusal, not a
+    # default-allow. A bare int is money, so both of these are correctly refused even
+    # though 1,000 is under the recipient ceiling: it is not a number of recipients.
+    assert pol.authorizes(over) is False
+    assert pol.authorizes(under) is False
 
     # And the rule that makes the general model safe: a unit the policy never granted is
     # a refusal, not a default-allow. This tenant's policy has nothing to say about rows.

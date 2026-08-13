@@ -531,9 +531,15 @@ def main() -> int:
     if ok:
         print(f'\nPASS: {kills} kills, {report.replays} re-sends absorbed by the relay, '
               f'{report.risk_units:,} people messaged, 0 messaged twice.')
-        print('The engine did not change. tasks.py, memory.py, policy.py and db.py were '
-              'not touched;\nthe idempotency key is generated from '
-              '(tenant, task, step, seq) and knows nothing about money.')
+        # Precise about what this proves, because the earlier version of this line
+        # ("the engine did not change") stopped being true the moment prepare() learned
+        # to take a risk descriptor — and a stale boast is worse than no boast.
+        print('The authority decision was made in RECIPIENTS, not dollars: this policy '
+              'grants\ncomms.recipients and refuses money outright. The engine changes '
+              'this domain forced\nwere additive — claim() gained a task_type filter and '
+              'prepare() gained a risk\ndescriptor; no crash-window guarantee was '
+              'altered, and the idempotency key is still\ngenerated from '
+              '(tenant, task, step, seq) and knows nothing about either unit.')
     return 0 if ok else 1
 
 

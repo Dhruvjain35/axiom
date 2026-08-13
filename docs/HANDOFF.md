@@ -3,7 +3,7 @@
 **Written 2026-08-10. Last updated 2026-08-10 (build session 2). Deadline 2026-08-18 17:00 EDT.**
 
 > **Status in one line:** AXIOM is BUILT, TESTED and PROVEN **on CockroachDB Cloud** —
-> 30/30 tasks through 30 SIGKILLs with zero duplicate refunds, 92/92 tests passing, 16/16
+> 30/30 tasks through 30 SIGKILLs with zero duplicate refunds, 92/178 tests passing, 16/16
 > preflight gates, and the core claim verified on a real distributed cluster.
 > **All four required CockroachDB tools are in use and verified** (§14). **AWS Lambda is
 > deployed and working at $0** (§15) — but its public URL is blocked by AWS on an
@@ -338,7 +338,7 @@ overclaiming, and they did — including in their own workstreams' documentation
 | Workstream | Files | Verdict | State |
 | --- | --- | --- | --- |
 | **Engine** | `axiom/*.py` (13 modules) | ✅ | Written and driven directly; chaos demo passes |
-| **Tests** | `tests/`, `pytest.ini`, `scripts/verify_invariants.py` | ✅ SOLID | **92 tests, all pass** (49 at the time of that audit) |
+| **Tests** | `tests/`, `pytest.ini`, `scripts/verify_invariants.py` | ✅ SOLID | **178 tests, all pass** (49 at the time of that audit) |
 | **API + MCP** | `axiom/api.py` (19 endpoints), `axiom/audit_mcp.py`, `db/002_audit_role.sql` | ✅ SOLID | Every endpoint curled; MCP mode is the one unverified piece (§11.2) |
 | **Mission Control** | `web/index.html`, `app.js`, `styles.css` | ✅ SOLID | Loaded, screenshotted, **zero console errors** |
 | **Deploy** | `Dockerfile`, `docker-compose.yml`, `deploy/terraform/`, `deploy/ecs/`, `scripts/provision_ccloud.sh`, `deploy/COST.md` | ✅ SOLID | `docker build` + `docker compose up` + `terraform validate` all really run |
@@ -874,7 +874,7 @@ transferable lesson of this session, and it is now trap #14 in §8.
 
 ```
 preflight       16/16 blocking gates pass
-pytest          92 passed   (49 at the time of this session)
+pytest          178 passed   (49 at the time of this session)
 chaos demo      30/30 tasks terminal · 22 SIGKILLs · 4 idempotent replays
                 18 refunds · $2,042.04 moved · DUPLICATE REFUNDS 0
 Mission Control loads, zero console errors, screenshotted

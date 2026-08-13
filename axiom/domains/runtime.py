@@ -19,9 +19,10 @@ than made. Until it lands, `axiom/domains/refunds.py` running through THIS loop 
 worker.py's own loop must produce identical rows, which tests/test_domain2.py asserts
 directly against the same protocol calls.
 
-THE ONE THING THAT IS GENUINELY MISSING FROM THE CORE
------------------------------------------------------
-tasks.claim() has no task_type predicate. axiom_task HAS the column; the claim query and
+WHAT THIS DOMAIN'S EXISTENCE FORCED INTO THE CORE  (resolved)
+------------------------------------------------------------
+tasks.claim() had no task_type predicate. It has one now, and this loop passes it; the
+paragraph below is kept because it is the argument that produced the change. axiom_task HAS the column; the claim query and
 the axiom_task_claimable partial index simply do not look at it, because until now there
 was exactly one workload and every worker could do every job. A heterogeneous fleet — a
 worker that can issue refunds but must never send email — therefore cannot express that
@@ -123,8 +124,13 @@ class DomainWorker:
                 break
             if deadline is not None and time.monotonic() >= deadline:
                 break
-            claimed = db.tx(lambda cur: tasks.claim(cur, agent_id=self.agent_id,
-                                                    shards=self.shards or None))
+            claimed = db.tx(lambda cur: tasks.claim(
+                cur, agent_id=self.agent_id, shards=self.shards or None,
+                # Claim only what this worker can execute. Without it a heterogeneous
+                # fleet claims everything and hands most of it back — measured at 1,720
+                # foreign claims in a single run — and each of those bumps the fence,
+                # evicting whichever worker legitimately held the task.
+                task_types=[self.domain.task_type]))
             if claimed is None:
                 idle_rounds += 1
                 if idle_exit and idle_rounds > 3:
@@ -259,9 +265,16 @@ class DomainWorker:
                 cur, task=task, agent_id=self.agent_id, step_name=step,
                 provider_name=d.provider_name, operation=d.operation,
                 request_body=request_body,
-                # The risk quantity goes into amount_cents and its unit code into
-                # currency. For broadcast that reads 4800 / 'RCP' — four thousand eight
-                # hundred recipients, in a column named for money. See domains/__init__.
+                # The AUTHORITY decision is now asked in the domain's own units:
+                # `comms.recipients=4800, IRREVERSIBLE` rather than the integer 4800
+                # smuggled through a column named for money. RiskAxis.descriptor() was
+                # written for exactly this and its docstring said "nothing in the engine
+                # asks for this yet"; prepare() asks now.
+                risk=d.risk.descriptor(intent.risk_units, intent.reason),
+                # amount_cents/currency still carry the magnitude because the RECEIPT and
+                # the mission budget are stored in those columns, and renaming them is a
+                # schema change to a live cluster for a cosmetic gain. What changed is
+                # that they no longer decide anything — they record.
                 amount_cents=intent.risk_units, currency=d.risk.code,
                 policy_id=d.policy_id, licensed_by_memory_id=licensed_by))
         except BudgetExceeded as e:

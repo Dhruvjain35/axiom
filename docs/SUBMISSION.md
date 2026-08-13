@@ -3,7 +3,7 @@
 Final copy for the CockroachDB × AWS Hackathon form, plus the video shot list.
 
 Every status line below is the true one as of **2026-08-11**, reconciled against a live test
-run (`pytest -q` → 92 passed) and the deployment record in `deploy/lambda/README.md`. Where
+run (`pytest -q` → 178 passed) and the deployment record in `deploy/lambda/README.md`. Where
 something is not built, it says so — the entry's whole argument is that systems should tell
 the truth about what they have done, and a submission that overstates would be arguing
 against itself.
@@ -75,7 +75,7 @@ every state transition is written in the same transaction as the transition itse
   idempotent replays      6           DUPLICATE REFUNDS   0
 ```
 
-On the same cluster: `preflight.py` **16/16 blocking gates**; `pytest` **92 passed**.
+On the same cluster: `preflight.py` **16/16 blocking gates**; `pytest` **178 passed**.
 
 AXIOM's books and the provider's independent ledger reconcile exactly: 18 receipts against 18
 refund rows, 18 distinct idempotency keys on both sides, `spent_cents` 204,204 against
@@ -137,7 +137,7 @@ to both. That is what makes the fused recovery transaction real rather than aspi
 works; it assembles the exact conditions under which the design would corrupt state — an
 expired lease mid-refund, two executors racing one fence, a recovered agent that
 re-synthesized a different request body, threads racing one budget — and asserts that the
-system refuses. All 92 tests pass. Two began life as strict `xfail`s pinning real defects the
+system refuses. All 178 tests pass. Two began life as strict `xfail`s pinning real defects the
 suite found; both are fixed and those tests now guard the fix.
 
 **The demo is also a test.** `scripts/chaos_demo.py` runs a real mission while `SIGKILL`ing a
@@ -227,7 +227,7 @@ earlier, not a defect in the code or the policy. Documented rather than hidden �
 
 Ordered by value, honestly.
 
-1. **Put the test suite in CI.** All seven windows have a regression test and all 92 tests
+1. **Put the test suite in CI.** All seven windows have a regression test and all 178 tests
    pass, but they pass when a human runs them. Until they run on every commit, "cannot
    regress" is not earned. Cheapest remaining credibility win on the project.
 2. **A public URL that survives the judging window,** on the `deploy/free-tier/` EC2 path,

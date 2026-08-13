@@ -79,13 +79,36 @@ class Policy:
         tighten every policy already published — and a migration that changes what a
         signed policy MEANS is worse than one that changes what it says.
 
-        Because the synthesized grant is always present, a policy that never mentions
-        money still authorizes an action that moves none (magnitude 0 clears a ceiling of
-        0), which is exactly how `authorizes(None)` behaved before.
+        THE SYNTHESIZED GRANT IS NOT UNCONDITIONAL, and it was, which was a hole.
+
+        Injecting it into every policy made money the one unit that could never be
+        ungoverned. Measured before this was fixed: a policy whose only stated grant was
+        `comms.recipients`, carrying an inherited `max_auto_action_cents = 50000`,
+        self-authorized 49,999 cents of IRREVERSIBLE money movement — because the money
+        grant was appended to it silently. The stated rule of this model is "an ungoverned
+        unit is a refusal", and money was quietly exempt from it. The special case had not
+        disappeared; it had moved up one layer, which is worse, because the layer it moved
+        to is not where anybody looks for it.
+
+        So the ceiling is read as a grant only when the policy has NOT stated its authority
+        in the new vocabulary:
+
+          - no risk_grants (every policy published before db/004_risk.sql, and every
+            policy that still thinks in dollars): synthesize it, and those policies decide
+            exactly as they always did. That compatibility is the whole point of the
+            migration being additive.
+          - risk_grants present: the policy is speaking the general language, so it must
+            say what it authorizes — including money, if it authorizes any. Silence about
+            a unit means no authority over it.
+
+        A policy that mentions neither still authorizes an action that moves nothing:
+        magnitude 0 clears a ceiling of 0, which is how `authorizes(None)` behaved before.
         """
+        if self.risk_grants:
+            return self.risk_grants
         money = Grant(risk_mod.MONEY_USD_CENTS, self.max_auto_action_cents,
                       Reversibility.IRREVERSIBLE)
-        return (*self.risk_grants, money)
+        return (money,)
 
     def decide(self, action: Risk | int | None) -> risk_mod.Decision:
         """The authority decision, with its reasons attached.

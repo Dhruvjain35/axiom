@@ -49,7 +49,7 @@ axis — enforced by convention and by the demo, not by the database.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol, Sequence, runtime_checkable
 
 from .. import risk as risk_mod

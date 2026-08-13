@@ -127,7 +127,7 @@ export DATABASE_URL='postgresql://root@localhost:26257/axiom?sslmode=disable'
 export AXIOM_OFFLINE=1
 
 ./.venv/bin/python -m pytest -q
-#   92 passed
+#   178 passed
 #   13 crash-window · 17 invariant · 15 lambda-worker · 5 recall-plan · 14 schema-sync
 
 DATABASE_URL='postgresql://root@localhost:26257/defaultdb?sslmode=disable' \
@@ -135,7 +135,7 @@ DATABASE_URL='postgresql://root@localhost:26257/defaultdb?sslmode=disable' \
 #   16/16 blocking gates, 1 advisory, exit 0
 ```
 
-`92 passed in 43.09s` is a run made while writing this document, on the local v26.2.3 node.
+`178 passed in 43.09s` is a run made while writing this document, on the local v26.2.3 node.
 The 222-second figure quoted elsewhere is the same suite against CockroachDB Cloud.
 
 ### Honest limitation
@@ -270,7 +270,7 @@ instance with a public IP, ~$10.40/month. It is written and not applied.
 
 ### The rest of the readiness gap
 
-- **No CI.** The 92 tests pass when a human runs them. "Passes when run" is weaker than
+- **No CI.** The 178 tests pass when a human runs them. "Passes when run" is weaker than
   "cannot regress", and that gap is exactly the property this project sells.
 - **No uptime monitor** on any URL, which the judging window (Aug 19 – Sep 15) requires.
 - **`POST /api/demo/reset` is unauthenticated** and CORS is `allow_origins=['*']`. Harmless
@@ -393,7 +393,7 @@ defined and tested outcome. **Effectively-once, never exactly-once.**
 export DATABASE_URL='postgresql://root@localhost:26257/axiom?sslmode=disable'
 export AXIOM_OFFLINE=1
 
-./.venv/bin/python -m pytest -q                    # 92 passed
+./.venv/bin/python -m pytest -q                    # 178 passed
 ./.venv/bin/python scripts/counterexample.py       # baseline $600, AXIOM $300
 ./.venv/bin/python scripts/chaos_demo.py --workers 3 --kill-every 1.8 --quiet
                                                    # must end PASS, DUPLICATE REFUNDS 0

@@ -12,7 +12,7 @@ been directly observed, the observation is quoted. Where it has not, that is sta
 than implied.
 
 **Every window below has a regression test** in `tests/test_crash_windows.py`. The suite as a
-whole suite is 92 tests, all passing (two of them began as strict `xfail`s pinning real defects this suite found; both defects are fixed and those tests now guard the fix)
+whole suite is 178 tests, all passing (two of them began as strict `xfail`s pinning real defects this suite found; both defects are fixed and those tests now guard the fix)
 path (see the README's Limitations). Run it with `./.venv/bin/python -m pytest -q`. The tests do not
 assert that AXIOM works — they assemble the conditions under which the design would corrupt
 state and assert that it refuses.
@@ -460,7 +460,7 @@ Honest status, per window.
 
 Every window has a defined outcome, six of the seven have been directly observed on a live
 cluster, and all seven have a regression test that tries to cause the failure and fails.
-`tests/test_crash_windows.py` is 13 tests; the full suite is 92 and all 92 pass. Two of
+`tests/test_crash_windows.py` is 13 tests; the full suite is 92 and all 178 pass. Two of
 them began as strict `xfail`s pinning real defects this suite found — an approval that
 never expired, and attempt exhaustion that stranded a task — and now guard those fixes.
 

@@ -381,6 +381,7 @@ def prepare(
     request_body: dict,
     amount_cents: int | None,
     currency: str = 'USD',
+    risk: 'Any | None' = None,
     policy_id: str = 'refund_authority',
     licensed_by_memory_id: uuid.UUID | None = None,
 ) -> PrepareResult:
@@ -417,8 +418,22 @@ def prepare(
                        WHERE id = %s""", (pol.policy_id, pol.version, str(task.id)))
         task.policy_id, task.policy_version = pol.policy_id, pol.version
 
+    # THE AUTHORITY QUESTION, asked in the action's own units.
+    #
+    # `risk` is a full descriptor from axiom/risk.py — (unit, magnitude) measurements plus
+    # a reversibility. `amount_cents` remains the fallback for every caller that has not
+    # been ported, and for the refund path where dollars genuinely ARE the risk.
+    #
+    # This mattered more than it looks. Before it existed, a domain whose risk is people
+    # rather than money had to smuggle its recipient count through `amount_cents` to get
+    # a decision out of the policy — the second domain did exactly that, and the code
+    # called it what it was: "a column-naming lie". The authority model had been
+    # generalized while the one transaction that authorizes irreversible acts still only
+    # spoke dollars, so the generality was real in axiom/risk.py and fictional in practice.
+    authority_input = risk if risk is not None else amount_cents
+
     approval_id: uuid.UUID | None = None
-    if not pol.authorizes(amount_cents):
+    if not pol.authorizes(authority_input):
         # A human may already have ruled on exactly this action. Burning the single-use
         # decision token is what authorizes crossing the policy ceiling — ONCE. Without
         # this consume step an approved task simply re-parks on the next claim, because
@@ -431,7 +446,7 @@ def prepare(
         approval_id = consume_approval(cur, tenant_id=task.tenant_id, task_id=task.id,
                                        step_name=step_name)
 
-    if approval_id is None and not pol.authorizes(amount_cents):
+    if approval_id is None and not pol.authorizes(authority_input):
         # RETURNED, never raised.
         #
         # This was a real bug and it is worth keeping the scar tissue visible: parking
@@ -443,8 +458,7 @@ def prepare(
         # transaction and a terrible way to return a value from one.
         approval_id = request_approval(
             cur, task=task, agent_id=agent_id, step_name=step_name,
-            reason=(f'amount {amount_cents} exceeds policy {pol.policy_id} v{pol.version} '
-                    f'limit {pol.max_auto_action_cents}' if not pol.requires_approval
+            reason=(pol.decide(authority_input).reason if not pol.requires_approval
                     else f'policy {pol.policy_id} v{pol.version} requires approval'),
             proposed_action={'operation': operation, 'request_body': request_body},
             proposed_amount_cents=amount_cents,
