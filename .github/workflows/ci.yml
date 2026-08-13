@@ -1,0 +1,114 @@
+name: invariants
+
+# The audit's words: "passes when a human runs it" is weaker than "cannot regress" — and
+# "cannot regress" is exactly the property this project sells. A suite that asserts a
+# system cannot corrupt state, and is then only ever run by hand, is making a promise it
+# does not keep about itself.
+#
+# So: every push and every pull request stands up a real CockroachDB, applies the real
+# schema, and runs the real suite. Not a mock, not sqlite. Half of what these tests assert
+# is CockroachDB-specific — SERIALIZABLE retries, partial-index predicates, generated
+# columns, a vector index that must be CHOSEN by the optimizer rather than merely exist —
+# and none of it can be checked against a stand-in.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A queue system's test suite claims tasks from a shared queue. Two runs against the
+  # same cluster would steal each other's work and fail in ways that look like invariant
+  # violations and are not — the suite has a guard that detects exactly this and aborts.
+  # Serializing per-ref is cheaper than debugging that twice.
+  group: invariants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  invariants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Start CockroachDB
+        # Run as a step rather than a `services:` container: the image's entrypoint needs
+        # a subcommand (`start-single-node`), and `services:` gives no clean way to supply
+        # one. v25.4+ is required — vector indexing went GA there and was default-OFF
+        # before, so an older image fails the schema loudly rather than degrading quietly.
+        run: |
+          docker run -d --name crdb -p 26257:26257 \
+            cockroachdb/cockroach:v25.4.14 \
+            start-single-node --insecure --store=type=mem,size=2GiB
+          for i in $(seq 1 60); do
+            if docker exec crdb ./cockroach sql --insecure -e 'SELECT 1' >/dev/null 2>&1; then
+              echo "cluster up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "cluster did not become ready"; docker logs crdb; exit 1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Apply schema
+        # Order matters and cost a debugging round once: 002 grants on objects that 003
+        # creates, so 001 -> 003 -> 002. Applying 001 -> 002 -> 003 fails with 3D000.
+        env:
+          BOOT: postgresql://root@localhost:26257/defaultdb?sslmode=disable
+        run: |
+          docker cp db crdb:/db
+          docker exec crdb ./cockroach sql --insecure -f /db/001_schema.sql
+          docker exec crdb ./cockroach sql --insecure -f /db/003_provider.sql
+          docker exec crdb ./cockroach sql --insecure -f /db/002_audit_role.sql
+          for f in db/004_*.sql db/005_*.sql; do
+            [ -e "$f" ] || continue
+            echo "applying $f"
+            docker exec crdb ./cockroach sql --insecure -f "/$f"
+          done
+
+      - name: Run the invariant suite
+        env:
+          DATABASE_URL: postgresql://root@localhost:26257/axiom?sslmode=disable
+          # Offline: deterministic embeddings and rule-based triage, so CI needs no AWS
+          # credentials and no network. A suite that cannot run without secrets is a suite
+          # that stops running on the first fork.
+          AXIOM_OFFLINE: '1'
+          AXIOM_LEASE_SECONDS: '2'
+        run: python -m pytest -q --tb=short
+
+      - name: Prove it under real process death
+        # The unit suite asserts each crash window in isolation. This kills actual worker
+        # processes with SIGKILL while a mission runs and then audits the external
+        # provider's ledger. It is the only check here that exercises the whole system the
+        # way production would break it.
+        env:
+          DATABASE_URL: postgresql://root@localhost:26257/axiom?sslmode=disable
+          AXIOM_OFFLINE: '1'
+        run: |
+          python -m axiom.seed --reset
+          python scripts/chaos_demo.py --workers 3 --kill-every 1.8 --timeout 150 --quiet
+
+      - name: Assert the vector index is still chosen
+        # Correct rows come back whether or not the optimizer picks the vector index, so a
+        # regression here is invisible to every other test in this file: the recall query
+        # silently degrades to a full scan, looks perfect on demo data, and collapses at
+        # scale. Only an assertion on the PLAN catches it.
+        env:
+          DATABASE_URL: postgresql://root@localhost:26257/defaultdb?sslmode=disable
+          AXIOM_OFFLINE: '1'
+        run: python scripts/preflight.py
+
+      - name: Cluster logs on failure
+        if: failure()
+        run: docker logs crdb --tail 200
