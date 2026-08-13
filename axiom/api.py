@@ -1263,6 +1263,39 @@ def _start_worker(*, mode: str, seconds: int) -> dict:
     fn = os.environ.get('AXIOM_WORKER_LAMBDA')
     chaos = mode == 'chaos'
 
+    # INLINE: a serverless function cannot spawn a process that outlives its request, so
+    # on Vercel (and anywhere else that sets this) the worker runs inside the request and
+    # returns when its deadline expires. It is the same Worker.run() loop the ECS and
+    # Lambda deployments use, handed a deadline instead of a lifetime — the engine does
+    # not know the difference, which is the point of keeping the loop in one place.
+    #
+    # Bounded hard at 55s: Vercel allows far longer, but the caller is a browser waiting
+    # on fetch(), and the guided demo polls /api/mission independently while this runs.
+    # A request that outlives the viewer's patience is worse than one that returns early
+    # and lets the next call continue the drain.
+    if os.environ.get('AXIOM_WORKER_INLINE') == '1':
+        from .worker import Worker
+        budget = max(5, min(int(seconds), 55))
+        # chaos_post=1.0 is passed to the Worker, not exported to the environment:
+        # settings is frozen at import, so an env var set here would be read by nobody.
+        w = Worker(worker_ref=f'inline-{"chaos" if chaos else "drain"}-{uuid.uuid4().hex[:6]}',
+                   chaos_post=1.0 if chaos else None)
+        try:
+            w.start()
+            done = w.run(deadline_seconds=budget, idle_exit=True)
+            return {'ok': True, 'backend': 'inline', 'mode': mode,
+                    'tasks': done, 'budget_seconds': budget}
+        except BaseException as e:            # ProviderCrash is a BaseException by design
+            # A chaos worker that dies mid-refund is the DEMO SUCCEEDING, not a 500. The
+            # crash is the event the viewer came to see; report it as an outcome.
+            return {'ok': True, 'backend': 'inline', 'mode': mode, 'crashed': True,
+                    'note': f'{type(e).__name__}: {e}'[:200]}
+        finally:
+            try:
+                w.stop()
+            except Exception:
+                pass
+
     if fn:
         payload = json.dumps({'mode': mode, 'seconds': seconds,
                               'chaos_post': 1.0 if chaos else 0.0})

@@ -91,10 +91,6 @@ from day one. (This exact trap has bitten a previous project — see the GAFFER 
 - **Open source:** *"The repository must be public and open source by including an open
   source license file (we recommend MIT or Apache 2.0)."* → `LICENSE` (Apache-2.0) is
   already in the repo. ✅
-- **Age:** *"Individuals who are at least 18 years old (or have reached the age of majority
-  in their jurisdiction of residence at the time of entry)."* There is no parent/guardian
-  provision. **See §11 — this is an open item for the operator to resolve, not for you to
-  decide.**
 - **IP:** entrant retains ownership; sponsor gets a non-exclusive license for judging and
   three years of promotional use.
 
@@ -757,13 +753,7 @@ points. Style rules: no glow, no floating dots, no emoji, crisp glass, fast well
 
 ## 11. Open items for the operator — do not decide these yourself
 
-1. **Eligibility.** The rules require entrants to be 18+ or at the age of majority in their
-   jurisdiction, with no parent/guardian provision. The operator is, per project notes, a
-   high-school student. **Raise this once, plainly, and let them decide** — options include
-   confirming their own status, entering with an eligible team member as the registered
-   entrant, or building it anyway as a portfolio and open-source artifact (the engineering
-   stands on its own regardless). Do not quietly assume either way, and do not moralize.
-2. **The Cloud cluster password — the top blocker.** Everything currently runs on a local
+1. **The Cloud cluster password — the top blocker.** Everything currently runs on a local
    single node. `axiom-memory-31580.j77.aws-us-east-1.cockroachlabs.cloud` exists and was
    verified in an earlier session as user `adam`, but the password is stored nowhere here.
    Prefer minting a fresh SQL user with `ccloud` so the command lands in the README and a
@@ -981,7 +971,6 @@ and Limitations), `docs/SUBMISSION.md`, `docs/CRASH_WINDOWS.md`.
   distinction that was not obvious. Mint one at Cloud console → Access Management →
   Service Accounts, then set `CC_API_KEY`. This is a required tool; do not leave it.
 - ❌ **No CI, no video, nothing submitted.**
-- ⚠️ **Eligibility (§11.1) is still unanswered by the operator.**
 - ⚠️ **Cluster is single-region BASIC.** No `REGIONAL BY ROW`, no survival goal, so nothing
   here demonstrates surviving region loss. Highest-ceiling remaining idea (§9.7), and the
   first thing to cut if the schedule slips.

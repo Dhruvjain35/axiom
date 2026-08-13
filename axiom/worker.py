@@ -32,6 +32,13 @@ from .models import AttemptState, MemoryClass, Outcome, TaskState, Trust, ctx_ex
 from .provider import ProviderCrash, ProviderError
 from .tasks import AlreadyLive, BudgetExceeded, FingerprintMismatch, LeaseLost
 
+# PROCESS-level stop, set by SIGTERM/SIGINT. It means "this whole process is going away".
+# It is deliberately NOT what Worker.stop() sets: a Worker is one unit of work, and in the
+# serverless deployments many Workers live and die inside a single warm process. Setting a
+# module-global from an instance method meant the FIRST inline worker to finish poisoned
+# every worker that instance ever ran afterwards — they each registered, immediately saw a
+# set flag, claimed nothing, and returned `tasks: 0`. The demo looked idle and proved
+# nothing, with no error anywhere.
 _stop = threading.Event()
 
 
@@ -40,12 +47,24 @@ def _log(msg: str) -> None:
 
 
 class Worker:
-    def __init__(self, shards: Sequence[int] | None = None, worker_ref: str | None = None):
+    def __init__(self, shards: Sequence[int] | None = None, worker_ref: str | None = None,
+                 chaos_post: float | None = None, chaos_pre: float | None = None):
+        # Chaos is passed IN, not read from the environment at dispatch time.
+        # `settings` is a frozen dataclass built once at import, so a caller that set
+        # AXIOM_CHAOS_POST just before starting a worker changed nothing — which is
+        # exactly what the hosted demo did: it asked for a crash on every run and never
+        # got one, and nothing errored to say so. An in-process caller must be able to
+        # ask for a crash without mutating global state that was already read.
+        self.chaos_post = chaos_post
+        self.chaos_pre = chaos_pre
         self.shards = list(shards) if shards else []
         self.worker_ref = worker_ref or f'local-{uuid.uuid4().hex[:10]}'
         self.agent_id: uuid.UUID | None = None
         self._held: set[uuid.UUID] = set()
         self._hb: threading.Thread | None = None
+        # This worker's own stop flag. Scoped to the instance so one worker finishing
+        # cannot end the next one in the same process.
+        self._stop = threading.Event()
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -66,7 +85,9 @@ class Worker:
         immediately, and the tasks this worker held become claimable as soon as their
         available_at passes. No reaper, no tombstone, no cleanup job.
         """
-        while not _stop.wait(settings.heartbeat_seconds):
+        while not (self._stop.is_set() or _stop.is_set()):
+            if self._stop.wait(settings.heartbeat_seconds):
+                break
             try:
                 held = list(self._held)
                 db.tx(lambda cur: tasks.heartbeat(cur, agent_id=self.agent_id,
@@ -75,7 +96,7 @@ class Worker:
                 _log(f'heartbeat failed: {type(e).__name__}: {e}')
 
     def stop(self) -> None:
-        _stop.set()
+        self._stop.set()
         try:
             db.tx(lambda cur: tasks.stop_agent(cur, agent_id=self.agent_id))
         except Exception:
@@ -83,11 +104,24 @@ class Worker:
 
     # ----------------------------------------------------------------- main loop
 
-    def run(self, max_tasks: int | None = None, idle_exit: bool = False) -> int:
+    def run(self, max_tasks: int | None = None, idle_exit: bool = False,
+            deadline_seconds: float | None = None) -> int:
+        """Claim and execute until the queue is dry, the count is met, or time runs out.
+
+        `deadline_seconds` exists for the serverless deployments, where a worker is not a
+        long-lived process but a bounded slice of one. The deadline is checked only
+        BETWEEN tasks, never inside one: a worker that abandoned a task mid-dispatch to
+        respect a clock would be manufacturing exactly the crash window this system exists
+        to survive, and it would do it on every single invocation. Overrunning the budget
+        by one task is correct; the caller sizes the budget with that in mind.
+        """
         done = 0
         idle_rounds = 0
-        while not _stop.is_set():
+        deadline = (time.monotonic() + deadline_seconds) if deadline_seconds else None
+        while not (self._stop.is_set() or _stop.is_set()):
             if max_tasks is not None and done >= max_tasks:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
                 break
             claimed = db.tx(lambda cur: tasks.claim(cur, agent_id=self.agent_id,
                                                     shards=self.shards or None))
@@ -107,11 +141,26 @@ class Worker:
                 # Correct behaviour, not an error: this process has been superseded.
                 _log(f'  lease lost on {claimed.dedupe_key}: {e}')
             except ProviderCrash as e:
-                # Simulated death. os._exit skips every finally block and every atexit
-                # hook, which is the point — a real SIGKILL does the same, and any
-                # cleanup we performed here would be cleanup a real crash never gets.
                 _log(f'  !! {e}')
-                os._exit(9)
+                if settings.crash_exits:
+                    # Simulated death. os._exit skips every finally block and every
+                    # atexit hook, which is the point — a real SIGKILL does the same, and
+                    # any cleanup we performed here would be cleanup a real crash never
+                    # gets. This is the path the chaos demo and the video use.
+                    os._exit(9)
+                # SERVERLESS: the worker shares a process with the HTTP request that
+                # started it, so os._exit would kill the caller's request too — the
+                # browser sees a dead socket and the guided demo stalls with nothing
+                # proven. (It did, on the first live deployment: 0 replays for two
+                # minutes.) Raising instead abandons the task at exactly the same durable
+                # state — ACTION_PREPARED, live receipt, lease still held and no longer
+                # heartbeating — which is the ONLY thing recovery reads. What is lost is
+                # the guarantee that no Python cleanup ran, and nothing in this class does
+                # cleanup that would change the outcome; the fence is in the database.
+                #
+                # Stated plainly because it is the one place the hosted demo is weaker
+                # than the local one: `scripts/chaos_demo.py` sends a real SIGKILL.
+                raise
             finally:
                 self._held.discard(claimed.id)
         return done
@@ -240,7 +289,8 @@ class Worker:
                 order_ref=receipt.request_body['order_ref'],
                 amount_cents=receipt.amount_cents or 0,
                 currency=receipt.currency or 'USD',
-                request_body=receipt.request_body)
+                request_body=receipt.request_body,
+                chaos_pre=self.chaos_pre, chaos_post=self.chaos_post)
         except ProviderError as e:
             if e.retryable:
                 db.tx(lambda cur: tasks.fail_retryable(

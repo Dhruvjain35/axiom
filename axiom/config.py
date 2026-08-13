@@ -95,5 +95,15 @@ class Settings:
         default_factory=lambda: float(os.environ.get('AXIOM_CHAOS_POST', '0')))
     provider_latency_ms: int = field(default_factory=lambda: _i('AXIOM_PROVIDER_LATENCY_MS', 120))
 
+    # How a chaos-injected crash ends the process.
+    #
+    # True (default): os._exit(9) — no finally, no atexit, exactly what SIGKILL does.
+    # False: raise, for deployments where the worker shares a process with the HTTP
+    # request that started it. Killing the process there kills the caller's request, so
+    # the browser sees a dead socket instead of a recovery. The task is abandoned in the
+    # same durable state either way — ACTION_PREPARED with a live receipt — and that
+    # state is all recovery reads.
+    crash_exits: bool = field(default_factory=lambda: _b('AXIOM_CRASH_EXIT', True))
+
 
 settings = Settings()

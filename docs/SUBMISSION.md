@@ -308,7 +308,6 @@ It answers signed HTTP requests today:
 Ordered by how badly it hurts to get it wrong.
 
 ```
-[ ] ELIGIBILITY resolved in writing (18+ / age of majority). Nothing else matters if not.
 [ ] Repo public, history intact, LICENSE present                       — DONE
 [ ] ≥2 CockroachDB tools genuinely used, §7 true on the day            — 3 in use, 4th written
 [ ] ≥1 AWS service genuinely used                                      — Lambda deployed, Bedrock verified

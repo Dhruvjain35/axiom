@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "main.py": {
+      "memory": 1024,
+      "maxDuration": 300,
+      "excludeFiles": "{tests/**,deploy/**,scripts/**,docs/**,.local-crdb/**,cockroach-v*/**,.venv/**,heap_profiler/**,pprof_dump/**,goroutine_dump/**,inflight_trace_dump/**,executiontrace_dump/**,**/__pycache__/**,**/*.pyc}"
+    }
+  }
+}

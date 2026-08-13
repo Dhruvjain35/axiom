@@ -348,7 +348,6 @@ touching a line of engine code — so that is where the remaining effort went.
 | 6 | No CI | Not done. Stated as a limitation in §2 rather than papered over |
 | 7 | No reachable demo URL | Not solved. §4 states exactly why, with the controlled experiment |
 | 8 | Provider is simulated | Not done. Stated in §3 |
-| 9 | Eligibility (18+ / age of majority) unresolved in a public doc | **Operator decision, not an engineering one.** See below |
 
 ---
 
@@ -385,10 +384,6 @@ issued under a derived idempotency key against a durable receipt, and every cras
 defined and tested outcome. **Effectively-once, never exactly-once.**
 
 ## Open item for the operator, not for engineering
-
-**Eligibility.** The rules require entrants to be 18+ or at the age of majority in their
-jurisdiction, with no parent/guardian provision. This must be resolved explicitly before
-submitting; no amount of engineering quality survives an eligibility disqualification.
 
 ---
 

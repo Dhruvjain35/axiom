@@ -31,6 +31,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
 from psycopg.rows import dict_row
@@ -51,27 +52,56 @@ def provider_url() -> str:
     explicit = os.environ.get('PROVIDER_DATABASE_URL')
     if explicit:
         return explicit
-    base = settings.database_url
-    # swap the database component for `provider`
-    head, _, tail = base.rpartition('/')
-    dbname, sep, query = tail.partition('?')
-    return f'{head}/provider{sep}{query}' if sep else f'{head}/provider'
+
+    # Swap ONLY the database component, using a real URL parser.
+    #
+    # This was `base.rpartition('/')`, which works right up until the connection string
+    # carries a query parameter containing a slash — and exactly one does:
+    #
+    #   ...:26257/axiom?sslmode=verify-full&sslrootcert=certs/root.crt
+    #
+    # rpartition finds the slash in `certs/root.crt`, so the "database name" it replaced
+    # was `root.crt` and the provider pool was handed a URL pointing at a database called
+    # `provider` inside a mangled query string. It failed with "no connection after 6s",
+    # which reads like a network or connection-limit problem and is neither — the first
+    # Vercel deploy spent a debugging round on that.
+    #
+    # CockroachDB Cloud requires the cluster CA on disk (its CA is not in the system trust
+    # store), so a path-valued parameter is not an edge case here, it is the normal case.
+    parts = urlsplit(settings.database_url)
+    return urlunsplit((parts.scheme, parts.netloc, '/provider',
+                       parts.query, parts.fragment))
 
 
 def pool() -> ConnectionPool:
     global _pool
     if _pool is None:
-        # max_size was 6, and six concurrent viewers exhausted it: every Mission Control
-        # poll hits /api/provider/stats, so a handful of judges browsing at once produced
-        # HTTP 503 on the one number the demo exists to show. The provider is a stand-in
-        # for a remote API, so its pool should be sized for read fan-out, not for the
-        # single worker that writes to it. min_size 2 keeps a warm connection so the first
-        # request after an idle gap does not pay TCP+TLS setup.
-        _pool = ConnectionPool(provider_url(), min_size=2, max_size=16,
+        # Sized from settings, not hardcoded, because "the right pool" depends entirely on
+        # the deployment shape and this process runs in three of them:
+        #
+        #   one long-lived server   concurrency arrives as threads -> ONE pool must be wide
+        #                           (max_size 6 was exhausted by six simultaneous viewers,
+        #                           and every Mission Control poll hits provider/stats, so
+        #                           a handful of judges produced 503s on the one number
+        #                           the demo exists to show)
+        #   serverless              concurrency arrives as INSTANCES, each with its own
+        #                           pool -> every instance must be narrow, because the
+        #                           number that matters is instances x max_size against
+        #                           CockroachDB Basic's connection cap. A wide pool here
+        #                           is how a free-tier cluster runs out of connections and
+        #                           the demo dies with "no connection after 6s" — which is
+        #                           exactly what the first Vercel deploy did.
+        #
+        # min_size follows too: opening two connections during a cold start costs the
+        # first request two TLS handshakes it did not need.
+        _pool = ConnectionPool(provider_url(),
+                               min_size=settings.pool_min, max_size=settings.pool_max,
                                timeout=10.0, max_idle=300.0,
+                               check=ConnectionPool.check_connection,
                                kwargs={'row_factory': dict_row,
                                        'application_name': 'axiom-provider',
-                                       'connect_timeout': 10},
+                                       'connect_timeout': 10,
+                                       'options': '-c statement_timeout=15000'},
                                open=True)
     return _pool
 

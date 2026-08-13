@@ -1,0 +1,52 @@
+# What Vercel must not upload.
+#
+# `excludeFiles` in vercel.json trims the FUNCTION BUNDLE; it does not trim the upload.
+# The first deploy attempt pushed 864 MB and was rejected for a single file over 100 MB,
+# because this repo legitimately carries things a serverless function has no use for: a
+# vendored 339 MB CockroachDB binary, a local virtualenv, and a Terraform provider that
+# is larger than both. None of it is needed to serve the demo.
+#
+# Everything excluded here is either reproducible (venv, caches), a local-only tool
+# (cockroach binary, cluster data), or a deployment artifact for a DIFFERENT target
+# (Terraform providers, the Lambda build). The application itself is axiom/ + web/ +
+# main.py + certs/, which is a few hundred kilobytes.
+
+# local toolchain and data
+.venv/
+.local-crdb/
+cockroach-v*/
+cockroach-data/
+*.tgz
+
+# runtime dumps from a local single-node cluster
+heap_profiler/
+pprof_dump/
+goroutine_dump/
+inflight_trace_dump/
+executiontrace_dump/
+preflight.log
+
+# other deployment targets — none of this runs on Vercel
+deploy/terraform/.terraform/
+deploy/terraform/
+deploy/lambda/build/
+deploy/lambda/*.zip
+deploy/free-tier/
+deploy/ecs/
+
+# not needed to serve a request
+tests/
+docs/
+scripts/
+skills/
+.github/
+
+# caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+node_modules/
+.DS_Store
