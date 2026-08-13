@@ -1,0 +1,9 @@
+# Extra dependencies for the EXAMPLES only. Deliberately not in the root
+# requirements.txt: AXIOM's runtime must not grow a framework dependency to prove that it
+# integrates with one. Examples 01 and 03 need nothing beyond what AXIOM already installs.
+#
+#   pip install -r requirements.txt -r examples/requirements.txt
+#
+# Verified against these versions on 2026-08-12 (Python 3.14.5, macOS arm64). langgraph
+# pulls langchain-core, langgraph-checkpoint, langgraph-prebuilt and langsmith with it.
+langgraph==1.2.11

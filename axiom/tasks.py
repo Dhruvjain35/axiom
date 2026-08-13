@@ -233,7 +233,8 @@ def enqueue(cur: psycopg.Cursor, *, tenant_id: uuid.UUID, mission_id: uuid.UUID,
 
 def claim(cur: psycopg.Cursor, *, agent_id: uuid.UUID,
           shards: Sequence[int] | None = None,
-          task_id: uuid.UUID | None = None) -> Claimed | None:
+          task_id: uuid.UUID | None = None,
+          task_types: Sequence[str] | None = None) -> Claimed | None:
     """Take ownership of one claimable task. One statement, CAS on the fence.
 
     `available_at <= now()` means "ready to run OR the previous owner is dead", because
@@ -257,6 +258,17 @@ def claim(cur: psycopg.Cursor, *, agent_id: uuid.UUID,
     # fencing token, same state transition. Narrowing the candidate does not weaken the
     # concurrency guarantee, it only changes which row is contested.
     id_pred = 'AND id = %(task_id)s' if task_id else ''
+    # `task_types` lets a worker claim only work it can actually execute.
+    #
+    # Without it a multi-domain deployment has every worker claiming every task and
+    # handing back what it cannot process — the messaging demo measured 1,202 such
+    # round-trips in one run. That is not merely wasteful: claiming BUMPS THE FENCE, so a
+    # worker picking up a foreign task evicts whichever worker legitimately held it, which
+    # surfaces as a spurious LeaseLost in a process that was doing nothing wrong.
+    #
+    # It stays index-only: task_type is in axiom_task_claimable's STORING list, so the
+    # filter is evaluated without an index join back to the primary index.
+    type_pred = 'AND task_type = ANY(%(task_types)s::STRING[])' if task_types else ''
     cur.execute(f"""
         WITH candidate AS (
             SELECT id, lease_epoch
@@ -266,6 +278,7 @@ def claim(cur: psycopg.Cursor, *, agent_id: uuid.UUID,
               AND state IN ({_CLAIMABLE_SQL})
               AND attempt < max_attempts
               {id_pred}
+              {type_pred}
             ORDER BY available_at ASC
             LIMIT 1
         )
@@ -283,7 +296,8 @@ def claim(cur: psycopg.Cursor, *, agent_id: uuid.UUID,
                   t.policy_id, t.policy_version
     """, {'shards': list(shards) if shards else None, 'agent': str(agent_id),
           'lease': f'{settings.lease_seconds} seconds',
-          'task_id': str(task_id) if task_id else None})
+          'task_id': str(task_id) if task_id else None,
+          'task_types': list(task_types) if task_types else None})
 
     row = cur.fetchone()
     if not row:

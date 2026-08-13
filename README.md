@@ -32,6 +32,7 @@ pays **$600 for the same order**. AXIOM pays $300. That comparison ships in the 
 | **Video** | *(under 3:00 — link on submission; script in [docs/SUBMISSION.md](docs/SUBMISSION.md) §9)* |
 | **The case, criterion by criterion** | **[docs/JUDGING.md](docs/JUDGING.md)** — what it does, where to verify it, and the honest limitation, for each of the five judging criteria |
 | **The correctness spec** | [docs/CRASH_WINDOWS.md](docs/CRASH_WINDOWS.md) — one page per crash window, W1–W7 |
+| **"Temporal already does this"** | **[docs/COMPARISON.md](docs/COMPARISON.md)** — Temporal, Restate, DBOS, LangGraph, Letta, and a bare retry, each quoted from its own docs, each with the workloads where you should use it instead |
 | **Run it** | `pytest -q` → **92 passed** · `scripts/chaos_demo.py` → PASS · [Setup](#setup) |
 
 ---
@@ -99,6 +100,75 @@ without a transaction. It still pays twice, structurally:
 AXIOM faces the identical ambiguity and does not guess, because the receipt and the state
 transition committed together. The script prints `INCONCLUSIVE` rather than `PASS` if the
 baseline fails to double-refund, so a rigged run cannot masquerade as a result.
+
+---
+
+## Why not Temporal, LangGraph, or a vector database?
+
+Because the execution half and the memory half get solved in two different systems, and the
+seam between them is where the bug lives.
+
+Temporal is very good at durable execution and its docs tell you exactly how to make an
+action safe: derive the idempotency key from `workflowRunId + '-' + activityId`, because it
+"will be constant across Activity retries, and unique among all Workflows." **That works.**
+`scripts/incumbent_probe.py` implements it, kills the process in window W4 against the same
+provider, and gets one refund — the incumbent answer wins that round, in running code,
+before this repo argues anything else.
+
+The disagreement is about the *decision*, not the money. Temporal's Event History is
+per-execution and retrieved by workflow id; the thing that searches across executions is
+Visibility, which is "eventually consistent" and whose schema is seven scalar types with no
+vector among them. LangGraph's checkpointer and its semantic `BaseStore` are two interfaces
+configured separately (`compile(checkpointer=…, store=…)`) with no operation that commits
+both. Letta resumes the *stream* after a crash and its long-running-execution docs say
+nothing about whether an in-flight tool call re-executes. Pinecone documents being
+"eventually consistent." So the recovery path reads execution state from one system and
+memory from another, and assembles a decision out of two answers that were never
+simultaneously true.
+
+`scripts/incumbent_probe.py` builds that architecture with real durable stores and walks
+four legal schedules; all four produce a read set corresponding to no point in time in
+either store — including one where each store is updated perfectly atomically and the
+contradiction is purely on the read side. The same race through `tasks.recover()` cannot
+reach it, because the revocation, its replacement memory and its journal entry are one
+commit. The script prints `INCONCLUSIVE` if the race fails to occur, or if it only ever
+observes one of the two orderings.
+
+**[docs/COMPARISON.md](docs/COMPARISON.md)** is the long version: Temporal, Restate, DBOS,
+LangGraph, Letta and a bare retry loop, each quoted from its own documentation, each with an
+explicit list of the workloads where you should use it and not this. DBOS gets the most
+uncomfortable section — it had the co-location insight first and says so in its own words —
+and the "use a retry loop and go home" case is stated without hedging, because it is right
+more often than anything else on that page.
+
+---
+
+## Beyond refunds
+
+The engine was already generic; the coupling was at the edges. In `axiom/tasks.py` the word
+"refund" appears eight times and seven are in comments — the eighth is a default argument.
+`axiom/{db,events,config,embeddings,memory}.py` contain it zero times. CLAIM / PREPARE /
+DISPATCH / SETTLE / RECOVER never knew what they were protecting: they protect *an
+irreversible external call*, and money was only ever the example.
+
+What was refund-shaped was the edge, and it is now a seam you implement:
+
+| To run a different workload, write | Instead of |
+| --- | --- |
+| a `Domain` — what the side effect is, how to phrase the situation for memory, the triage vocabulary, the risk descriptor | `axiom/domains/refunds.py` |
+| the external system it calls | `axiom/provider.py` |
+| nothing else — the loop is domain-parameterized | `axiom/domains/runtime.py` |
+
+`axiom/domains/broadcast.py` is a second workload whose risk axis is not money at all
+(recipients on an irreversible send), and `axiom/risk.py` + `db/004_risk.sql` are what let a
+policy say "I self-authorize up to 5,000 recipients, provided the act is COMPENSABLE"
+instead of only "up to $200." Read [`axiom/domains/__init__.py`](axiom/domains/__init__.py)
+first — including its own account of the part that is still refund-shaped, which is in the
+column names.
+
+If you already have an agent and do not want to adopt a runtime, `axiom/adapter.py` is one
+decorator that puts the five protocols around the function that moves money and leaves it an
+ordinary callable.
 
 ---
 
@@ -517,9 +587,11 @@ The hackathon asks for a minimum of two of the four. Status is stated honestly p
 | `tests/` | 92 tests: 13 crash-window, 17 invariant, 15 Lambda-worker, 5 recall-plan, 14 schema-sync, 28 resilience. |
 | `scripts/chaos_demo.py` | The headline demo. |
 | `scripts/counterexample.py` | The baseline comparison. |
+| `scripts/incumbent_probe.py` | The two-system architecture, modelled with real durable stores, raced against `tasks.recover()`. Arm 2 is a demonstration that the incumbent answer works. |
 | `scripts/preflight.py` | 17 gates against a live cluster: 16 blocking + 1 advisory. |
 | `skills/` | The Agent Skills contribution, ready to PR upstream. |
 | `docs/JUDGING.md` | The criterion-by-criterion case, with the limitations. |
+| `docs/COMPARISON.md` | Temporal, Restate, DBOS, LangGraph, Letta, and a bare retry — quoted from their own docs, with the workloads where you should use them instead. |
 | `docs/ARCHITECTURE.md` | Protocols, SQL, index design. |
 | `docs/CRASH_WINDOWS.md` | One page per crash window, W1–W7. |
 

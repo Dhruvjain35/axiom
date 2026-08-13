@@ -1,0 +1,149 @@
+-- =====================================================================================
+-- AXIOM :: 004_risk.sql — the authority model stops being money-shaped.
+--
+-- WHAT WAS WRONG
+-- --------------
+-- Until this migration a policy answered exactly one question:
+--
+--     is this action under max_auto_action_cents?
+--
+-- That is the right question for a refund and the wrong question for deleting 40,000
+-- records, sending 40,000 emails, dropping a production database, or revoking an
+-- engineer's access. For those, amount_cents is NULL, `NULL <= 20000` is vacuously
+-- satisfied, and the agent self-authorizes an irreversible act because the policy had
+-- no vocabulary in which to refuse. A ceiling denominated in dollars is not a weak
+-- control over a non-monetary act; it is no control at all.
+--
+-- THE MODEL
+-- ---------
+-- An action is described by FACTS the call site can state:
+--
+--   * one or more MEASUREMENTS — (unit, magnitude) pairs. 'money.usd_cents': 30000.
+--     'comms.recipients': 40000. 'data.rows': 12. 'infra.production_databases': 1.
+--   * one REVERSIBILITY — REVERSIBLE | COMPENSABLE | IRREVERSIBLE.
+--
+-- A policy grants AUTHORITY over those facts: a list of grants, each saying "for unit U
+-- I self-authorize up to magnitude M, provided the act is no worse than reversibility R".
+--
+-- Two axes rather than one because they are genuinely orthogonal. "How big is it?" and
+-- "can it be undone?" do not determine each other: soft-deleting 10,000 rows is large
+-- and cheap to reverse; hard-deleting 12 rows is small and permanent. A single scalar
+-- risk score cannot express that without the author secretly picking an exchange rate
+-- between them, and an exchange rate nobody wrote down is not a policy.
+--
+-- WHY GRANTS AND NOT A RISK TIER
+-- ------------------------------
+-- The obvious alternative is for the caller to hand over a tier — LOW / HIGH / CRITICAL.
+-- It is the same mistake as an application-supplied idempotency key: whoever names the
+-- tier has already made the authority decision, and the caller is the component we do
+-- not trust. Here the caller supplies only measurable facts, and the policy — human
+-- written, versioned, retirable, signable — supplies every judgement.
+--
+-- WHY JSONB ON THE VERSION ROW AND NOT A CHILD TABLE
+-- --------------------------------------------------
+-- A normalized axiom_policy_grant table would let a published version's authority be
+-- edited in place, which is precisely what versioning exists to prevent: the entire
+-- point of pinning policy_version at CLAIM is that one attempt is judged against one
+-- immutable rule set. One JSONB column on the version row makes "the rules" and "the
+-- version" the same durable object, so they cannot drift.
+--
+-- BACKWARD COMPATIBILITY, WHICH IS NOT NEGOTIABLE
+-- -----------------------------------------------
+-- max_auto_action_cents STAYS and keeps meaning exactly what it meant. Every policy row
+-- written before this migration has no grants at all and continues to behave
+-- identically, because axiom/risk.py synthesizes the money ceiling into a grant:
+--
+--     {unit: 'money.usd_cents', max_magnitude: <max_auto_action_cents>,
+--      max_reversibility: 'IRREVERSIBLE'}
+--
+-- Dollars therefore become one unit among several rather than a special case beside
+-- them, and the pre-004 semantics fall out of the general rule instead of being
+-- preserved by a branch. IRREVERSIBLE on the synthesized grant is what makes it a
+-- faithful translation: the old model had no reversibility gate, so the translation
+-- must not invent one.
+--
+-- THE RULE THAT MAKES THIS SAFE
+-- -----------------------------
+-- A measurement in a unit the policy does not grant is a REFUSAL, not a default-allow.
+-- A policy authored for refunds, shown an action measured in comms.recipients, parks on
+-- a human — even at magnitude 1, even when reversible. This mirrors NoActivePolicy:
+-- missing procedural memory is a hard stop, never a permissive fallback, because the
+-- alternative is an agent that authorized something because a config key was absent.
+--
+-- Apply:
+--   cockroach sql --insecure --host localhost:26257 -d axiom -f db/004_risk.sql
+--   cockroach sql --url "$CLOUD_URL" -f db/004_risk.sql
+--
+-- Idempotent and additive: every statement is IF NOT EXISTS, no existing row is
+-- rewritten, and db/001_schema.sql is not touched.
+-- =====================================================================================
+
+SET database = axiom;
+
+-- ---------------------------------------------------------------------- axiom_policy
+-- The general authority, as a JSON array of grants:
+--
+--   [{"unit": "comms.recipients", "max_magnitude": 500,  "max_reversibility": "COMPENSABLE"},
+--    {"unit": "data.rows",        "max_magnitude": 10000,"max_reversibility": "REVERSIBLE"},
+--    {"unit": "data.rows",        "max_magnitude": 100,  "max_reversibility": "IRREVERSIBLE"}]
+--
+-- Two grants for the same unit is not a conflict, it is the point: the third line says
+-- this policy will hard-delete at most 100 rows unattended while happily soft-deleting
+-- 10,000. The most permissive grant that COVERS the action wins; if none covers it, the
+-- action parks on a human.
+--
+-- max_reversibility is REQUIRED in each grant object rather than defaulted. A default
+-- would have to be permissive to keep pre-004 policies honest, and a silently permissive
+-- default on the axis that distinguishes "undo it" from "it is gone" is not a default
+-- worth having. axiom/risk.py raises MalformedGrant on a grant that omits it, which
+-- fails the load loudly instead of widening authority quietly.
+--
+-- NULLABLE, WITH NO DEFAULT, AND THAT IS DELIBERATE. `NOT NULL DEFAULT '[]'` reads
+-- better and costs a column backfill on every existing row; a nullable column with no
+-- default is a metadata-only change that completes instantly on a table of any size.
+-- On a live Cloud cluster serving the demo, "instant and unfailable" beats "tidy" —
+-- this exact statement was first written the tidy way and was rejected mid-backfill by
+-- the store's capacity guard, leaving a half-applied schema. NULL and '[]' mean the same
+-- thing to axiom/risk.py (no general grants; the money ceiling still applies), so the
+-- distinction is cosmetic where it matters and operational where it does not.
+ALTER TABLE axiom_policy
+    ADD COLUMN IF NOT EXISTS risk_grants JSONB;
+
+-- Shape enforcement at the only layer that cannot be bypassed. The element-level
+-- validation (unit spelling, non-negative magnitude, known reversibility label) lives in
+-- axiom/risk.py because it needs a vocabulary that must NOT require a migration to
+-- extend — a new domain gets a new unit string, not a schema change and a Cloud outage
+-- window. What the database guarantees is the part that never changes: if it is present
+-- at all, it is an array.
+ALTER TABLE axiom_policy
+    ADD CONSTRAINT IF NOT EXISTS axiom_policy_risk_grants_ck
+    CHECK (risk_grants IS NULL OR jsonb_typeof(risk_grants) = 'array');
+
+-- -------------------------------------------------------------- axiom_action_attempt
+-- The risk descriptor that was actually authorized, pinned to the receipt.
+--
+-- Same purpose as licensed_by_memory_id and policy_version one column over: if a policy
+-- is later found to have been too permissive, this is how you enumerate every real-world
+-- effect it licensed AND on what stated grounds. It also makes a false claim auditable —
+-- the descriptor is derived from the request body (see risk.measure), and the request
+-- body is fingerprinted into the receipt, so "the agent understated the blast radius"
+-- is a query rather than a theory.
+--
+-- HONEST STATUS: nullable, and currently NULL on every row. tasks.prepare() does not
+-- write it yet — that is a one-line change to an INSERT in a module this migration's
+-- author does not own. NULL means "pre-004, money-only", which is exactly true of every
+-- receipt minted so far.
+ALTER TABLE axiom_action_attempt
+    ADD COLUMN IF NOT EXISTS risk JSONB;
+
+-- ------------------------------------------------------------------- axiom_approval
+-- No change needed, and that is worth a line. axiom_approval.risk JSONB already exists
+-- from 001_schema.sql and has been empty since the day it was created; it is the right
+-- home for the descriptor a human is being asked to rule on, and Risk.to_json() is
+-- shaped to drop straight into it.
+
+-- --------------------------------------------------------------------- verification
+--   SHOW CREATE TABLE axiom_policy;          -- risk_grants JSONB (nullable)
+--   SHOW CREATE TABLE axiom_action_attempt;  -- risk JSONB (nullable)
+--   SELECT policy_id, version, max_auto_action_cents, risk_grants FROM axiom_policy;
+--   -- every pre-004 row must read NULL and must still authorize exactly what it did.
