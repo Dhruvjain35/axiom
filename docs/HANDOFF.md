@@ -3,12 +3,15 @@
 **Written 2026-08-10. Last updated 2026-08-10 (build session 2). Deadline 2026-08-18 17:00 EDT.**
 
 > **Status in one line:** AXIOM is BUILT, TESTED and PROVEN **on CockroachDB Cloud** —
-> 30/30 tasks through 30 SIGKILLs with zero duplicate refunds, 92/178 tests passing, 16/16
-> preflight gates, and the core claim verified on a real distributed cluster.
-> **All four required CockroachDB tools are in use and verified** (§14). **AWS Lambda is
-> deployed and working at $0** (§15) — but its public URL is blocked by AWS on an
-> hours-old account, which is the one open item.
-> What remains: **unblock the URL, then record the video** (§15.4).
+> 30/30 tasks through 30 SIGKILLs with zero duplicate refunds, **208 tests passing**, 16/16
+> blocking preflight gates, and the core claim verified on a real distributed cluster.
+> **Two public URLs are live** — Vercel and AWS API Gateway — and the AWS Function-URL
+> block that §15 treats as the one open item is SOLVED (§16). CockroachDB tools read
+> **3/4 in use** with the fourth submitted upstream as an open PR; AWS reads **2/5**.
+> What remains: **the Devpost form and the video upload** (§16.6).
+>
+> ⚠ **§§1-15 are a dated record and several of their conclusions have been overturned.**
+> Read §16 first — it is the current state, and it names what it supersedes.
 > Public repo: **https://github.com/Dhruvjain35/axiom**
 >
 > Jump to: §5 what exists · §5.3 the claim, proven · §5.4 the demo numbers ·
@@ -1174,15 +1177,119 @@ All three of these went through a chat transcript. **Rotate after Sep 21:**
 - The `axiom_app` SQL password (in this session's scratchpad, not in the repo —
   if lost, mint a new one with `ccloud cluster user password axiom-memory axiom_app`).
 
-### 15.6 Where the project actually stands
+### 15.6 Where the project stood at the end of §15
+
+> **SUPERSEDED — see §16.** Kept because the numbers are a true record of that session,
+> and because two of its conclusions turned out to be wrong in ways worth being able to
+> trace: "CockroachDB tools 4/4" counted a skill whose PR had not been opened, and
+> "Bedrock verified" was a claim built on isolated probes against a quota of zero.
 
 ```
-CockroachDB tools   4/4 in use and verified
-AWS services        Bedrock verified · Lambda deployed and working
+CockroachDB tools   4/4 in use and verified          <- overstated; see §16.2
+AWS services        Bedrock verified · Lambda deployed and working   <- see §16.3
 Cloud cluster       preflight 16/16 · pytest 64 · chaos 30/30, 0 duplicate refunds
 counterexample      baseline 2 refunds vs AXIOM 1, same crash instant
 repo                https://github.com/Dhruvjain35/axiom — public, 12 commits
 cost to date        $0.00
 ```
 
-The engineering is done. What is left is one AWS permission, a video, and a form.
+---
+
+# 16. CURRENT STATE — 2026-08-13
+
+This section supersedes §§1-15 wherever they disagree. It exists because the sections
+above are a chronological build log, and a reader who trusts their summaries will be
+wrong about three things.
+
+### 16.1 Where it actually stands
+
+```
+tests               208 passing
+preflight           16/16 blocking · gate 17 (vector-space) advisory, informational
+public URLs         https://axiom-one-sage.vercel.app          (Vercel, primary)
+                    https://nq0i2ob395.execute-api.us-east-2.amazonaws.com  (AWS)
+                    both pass scripts/uptime_check.sh 6/6
+CockroachDB tools   3/4 in use · 4th submitted upstream, PR open (16.2)
+AWS services        2/5 in use — Lambda, API Gateway (16.3)
+Stripe              real sandbox refund, PUBLIC receipt a judge can open without an
+                    account: /stripe-receipt redirects to Stripe's own page
+film                out/axiom-v3.mp4 in ~/axiom-video — 2:56.82, under the 3:00 ceiling
+repo                https://github.com/Dhruvjain35/axiom — public, 22 commits
+cost to date        $0.00
+```
+
+### 16.2 CockroachDB is 3/4, not 4/4
+
+The Agent Skills entry was counted as in use while its PR had never been opened. It is
+now open — cockroachlabs/cockroachdb-skills#23, 607 insertions, passing their own
+`validate-spec.py --strict` against upstream `e14e86d` — and it is still `in_use: false`,
+because measurements.json's own rule is that in_use means *part of the running deployed
+system today*. An unmerged PR to somebody else's repository is not that, however much it
+would flatter the count.
+
+Note for whoever picks this up: **PR #22 on that same repo**, opened ~24h before ours,
+adds `designing-durable-agent-execution` and shares three of AXIOM's ideas — intent
+committed before the effect, deterministic idempotency keys, lease-with-epoch fencing.
+Almost certainly another entrant in this hackathon.
+
+### 16.3 The AWS 403 is solved, and Bedrock is ruled out
+
+**API Gateway works where the Function URL does not.** A Function URL needs
+`lambda:InvokeFunctionUrl` for an *anonymous* principal, evaluated by the Function URL
+front end — that is what this account withholds. API Gateway needs `lambda:InvokeFunction`
+for the *named* service principal `apigateway.amazonaws.com`, evaluated by the Lambda
+control plane, and it is honored. Both doors are live on the same function right now:
+Function URL 403, HTTP API 200, same function, same moment. `deploy/lambda/apigateway.sh`
+rebuilds it; `--destroy` tears it down. $0.00/month.
+
+**Bedrock cannot be used on this account, and the earlier reason given was wrong.** §15
+says "no model is enabled". Models *are* enabled and both answer. The blocker is quota:
+
+```
+On-demand requests/min · Titan Text Embeddings V2   0.0
+On-demand tokens/min   · Titan Text Embeddings V2   0.0
+quota L-26C560CE · Adjustable = FALSE · same in us-east-1/2 and us-west-2
+sustained probe: 0 of 10 calls in 87.4s, all ThrottlingException
+```
+
+Isolated single calls *do* sometimes succeed — a burst allowance — which is exactly why a
+one-off probe looks like proof and is not. **Do not re-derive "Bedrock works" from one
+successful call.** Batch inference is available but needs ≥100 records per job and the
+real corpus is 10 seed texts; padding it to clear the minimum would buy a checkbox by
+embedding meaningless strings, so it was not done.
+
+### 16.4 A provenance bug worth knowing about
+
+`axiom_memory.embedding_model` was `NOT NULL DEFAULT 'amazon.titan-embed-text-v2:0'` and
+no insert path ever set it, so every row claimed a Titan embedding while holding a
+blake2b sketch or a sine test fixture. Nothing computed a wrong answer — both sides of
+every comparison were the same embedder — but the table was asserting provenance nothing
+had checked, which in this project is its own kind of bug.
+
+Rows were reclassified **by measurement**: a row is the offline sketch if
+`cos(stored, offline_embed(its own content)) > 0.99999`, the fixture if it reproduces
+`sin(r*0.7 + d*0.013)` to 1e-6. Zero matched neither, and the relabel was written to
+refuse if any had. `axiom/memory.py` now writes the model explicitly,
+`db/005_embedding_space.sql` drops the default, `scripts/reembed.py` migrates the corpus
+if the embedder ever changes, and preflight gate 17 reports the spaces present.
+
+### 16.5 Decisions taken, not open items
+
+- **`POST /api/demo/reset` stays ungated.** Mission Control's buttons send no token, so
+  gating removes RESET and RUN MISSION from the judge. Bounded: reset re-seeds rather
+  than empties, every route has a minimum interval, nothing can create unbounded work.
+- **The demo runs the deterministic embedder,** and now says so on every row. The vector
+  index, the C-SPANN prefix quarantine and the in-transaction recall are real CockroachDB
+  mechanics either way; the claim that Bedrock produced the vectors has been removed.
+- **The 2,500 sine-fixture rows stay on the cluster.** They are in their own tenant and
+  are what makes "the index is still chosen at 2,500 rows" checkable on the live cluster.
+
+### 16.6 What is left, and it is not engineering
+
+1. **Devpost submission** — from `docs/SUBMISSION.md`. Submit **Aug 17**, not the 18th.
+2. **Upload the video** — `~/axiom-video/out/axiom-v3.mp4`, 2:56.82.
+3. **Point `.github/workflows/uptime.yml` at whichever URL is submitted** — its `BASE` is
+   the Vercel one, so a break in the AWS URL during judging is currently silent.
+4. **Rotate every credential after Sep 15**: the AWS deploy key, the `axiom-bedrock` IAM
+   user created this session, the CockroachDB service-account key, the ElevenLabs key, and
+   the Stripe test key.

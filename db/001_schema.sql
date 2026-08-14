@@ -531,7 +531,13 @@ CREATE TABLE axiom_memory (
     content         STRING        NOT NULL,           -- the text that was embedded
     content_sha256  STRING        NOT NULL,
 
-    embedding       VECTOR(1024)  NOT NULL,           -- Titan Text Embeddings V2, 1024-d
+    embedding       VECTOR(1024)  NOT NULL,           -- 1024-d, the width Titan V2 pins
+    -- The DEFAULT below is a mistake, kept here only so this file still describes the
+    -- schema as it was first applied: nothing ever set the column, so every row claimed a
+    -- Titan embedding while holding whatever the running embedder actually produced.
+    -- db/005_embedding_space.sql DROPs it — a default on a provenance column is a claim
+    -- about where a vector came from that nothing checked. Written explicitly from
+    -- embeddings.MODEL_ID now, and asserted by preflight gate 17.
     embedding_model STRING        NOT NULL DEFAULT 'amazon.titan-embed-text-v2:0',
     embedding_dims  INT2          NOT NULL DEFAULT 1024,
     embedding_normalized BOOL     NOT NULL DEFAULT true,

@@ -27,6 +27,7 @@ Three of the gates below are inexpressible in static SQL:
 from __future__ import annotations
 
 import os
+import pathlib
 import sys
 import time
 import math
@@ -332,6 +333,42 @@ def main() -> int:
             gate('vector_search_beam_size tunable', True, f'set to {cur.fetchone()[0]}')
         except Exception as e:
             gate('vector_search_beam_size tunable', False, str(e)[:160])
+
+        # ---------------------------------------------------------------- 17 --
+        # ONE CORPUS, ONE VECTOR SPACE.
+        #
+        # AXIOM has two embedders — Bedrock Titan V2, and the deterministic stand-in the
+        # test suite runs on — and they produce vectors that are not comparable. A cosine
+        # query against a table holding both does not fail. It returns the wrong rows,
+        # ranked confidently, with no error anywhere, and every test that asserts 'recall
+        # returned something' keeps passing while recall has stopped meaning anything.
+        #
+        # This is the only gate here that guards against a silent wrong ANSWER rather
+        # than a broken query. Advisory rather than blocking for one reason: a corpus can
+        # legitimately hold a second space mid-migration, and scripts/reembed.py is the
+        # tool that finishes the job.
+        try:
+            # preflight deliberately talks to the cluster with raw psycopg and
+            # imports nothing from the package — it is the check that runs BEFORE
+            # trusting the package. This one gate needs the engine's own idea of
+            # which vector space it produces, so it reaches for it here and only
+            # here, adding the repo root to the path locally rather than at module
+            # scope so the rest of the file keeps its independence.
+            sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+            from axiom import embeddings as _emb
+            cur.execute('SELECT embedding_model, count(*) FROM axiom.axiom_memory GROUP BY 1 ORDER BY 2 DESC')
+            spaces = {r[0]: r[1] for r in cur.fetchall()}
+            summary = ' · '.join(f'{k}={v}' for k, v in spaces.items()) or 'empty'
+            # Fixture rows are a known, deliberate second space: tests/test_recall_plan
+            # loads 2,500 sine vectors in their own tenant to prove the index is still
+            # chosen at scale. They are not a migration failure.
+            real = {k: v for k, v in spaces.items() if not k.startswith('synthetic-')}
+            gate('corpus holds one real vector space', len(real) <= 1, summary,
+                 advisory=True)
+            gate('corpus space matches this process', not real or _emb.MODEL_ID in real,
+                 f'process={_emb.MODEL_ID} · {summary}', advisory=True)
+        except Exception as e:
+            gate('corpus holds one real vector space', False, str(e)[:160], advisory=True)
 
         return report()
 

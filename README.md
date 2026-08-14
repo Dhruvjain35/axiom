@@ -28,7 +28,7 @@ pays **$600 for the same order**. AXIOM pays $300. That comparison ships in the 
 
 | | |
 | --- | --- |
-| **Demo** | **No public URL.** The AWS deployment is live and works, but this account blocks anonymous Lambda Function URLs at the account level — the controlled experiment is in [Deployment](#deployment). It answers signed HTTP requests today via `deploy/lambda/signed_curl.py`, and runs locally — see [Setup](#setup). |
+| **Demo** | **https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/** — live on AWS, anonymous, `$0.00/month`. Health: [`/api/health`](https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/api/health) → `{"ok":true,"db":true,...}`. It also runs locally — see [Setup](#setup). |
 | **Video** | *(under 3:00 — link on submission; script in [docs/SUBMISSION.md](docs/SUBMISSION.md) §9)* |
 | **The case, criterion by criterion** | **[docs/JUDGING.md](docs/JUDGING.md)** — what it does, where to verify it, and the honest limitation, for each of the five judging criteria |
 | **The correctness spec** | [docs/CRASH_WINDOWS.md](docs/CRASH_WINDOWS.md) — one page per crash window, W1–W7 |
@@ -340,9 +340,9 @@ is shaped the way it is — is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
                            │
               ┌────────────┴────────────┐
               ▼                         ▼
-        Amazon Bedrock            Worker agents
-        Titan V2 embeddings       claim → prepare → dispatch → settle
-        Claude triage             (the process you are meant to kill)
+        Embeddings + triage       Worker agents
+        offline sketch today,     claim → prepare → dispatch → settle
+        Bedrock: quota 0/min      (the process you are meant to kill)
               │                         │
               └────────────┬────────────┘
                            ▼
@@ -496,6 +496,15 @@ Then use `?sslmode=verify-full` in `DATABASE_URL` and continue from step 3.
 `anthropic.claude-sonnet-4-5-20250929-v1:0`. The engine cannot tell the difference — that is
 the point of the provider interfaces in `embeddings.py` and `llm.py`.
 
+That instruction is correct on an account with quota and it **fails on the account this demo
+is deployed from**, which is worth knowing before you try it here. Both models are enabled and
+both answer a single call, but the on-demand quota for Titan Text Embeddings V2 is **0.0
+requests per minute and 0.0 tokens per minute** (quota `L-26C560CE`, `Adjustable: false`, the
+same in `us-east-1`, `us-east-2` and `us-west-2`), so a sustained probe got **0 of 10 calls
+through in 87.4 s, every one a `ThrottlingException`**. Isolated single calls do sometimes
+succeed — there is a small burst allowance — which is exactly why a one-off probe looks like
+proof that it works and is not one. Details in [AWS services used](#aws-services-used).
+
 ---
 
 ## Deployment
@@ -508,13 +517,28 @@ rather than reasoned about — invoke, wait 17 s / 30 s / 73 s / 220 s / 14 min,
 no request in any state returned a 500. The UI is served out of `/var/task/web` by the same
 `StaticFiles` mount the container uses, so this deployment needs no bucket and no CDN origin.
 
-**Zero billable resources.** Lambda's 1M requests + 400,000 GB-s/month is an always-free
-tier, not a 12-month offer. The ZIP is 11.2 MB, under the 50 MB direct-upload limit, so there
-is no S3 bucket, no ECR, no API Gateway, no ALB, no NAT.
+**The public URL:** https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/
 
-**There is no public URL, and the reason is not the code.** This AWS account refuses
-anonymous access to Lambda Function URLs at the account level. The controlled experiment —
-one function, one unchanged resource policy granting `lambda:InvokeFunctionUrl`:
+```console
+$ curl https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/api/health
+{"ok":true,"db":true,"provider":true,"version":"0.1.0","offline":true,"errors":{}}
+```
+
+Anonymous, unsigned, no credentials. An HTTP API (`apigatewayv2`) with a `$default` route
+on a `$default` stage, throttled to 20 req/s burst 40, in front of the same `axiom-api`
+function. Reproducible from [`deploy/lambda/apigateway.sh`](deploy/lambda/apigateway.sh),
+which is idempotent and takes `--destroy`.
+
+**Zero billable resources.** Lambda's 1M requests + 400,000 GB-s/month is an always-free
+tier, not a 12-month offer. API Gateway's 1M HTTP-API requests/month is free for 12 months
+— to Aug 2027, well past this demo's life — and an HTTP API with no traffic bills nothing.
+The ZIP is 11.2 MB, under the 50 MB direct-upload limit, so there is no S3 bucket, no ECR,
+no ALB, no NAT.
+
+**Getting that URL took a detour worth recording, because it looks like a
+misconfiguration and is not one.** This AWS account refuses anonymous access to Lambda
+**Function URLs** at the account level. The controlled experiment — one function, one
+unchanged resource policy granting `lambda:InvokeFunctionUrl`:
 
 | Setup | Result |
 | --- | --- |
@@ -530,7 +554,21 @@ policy syntax (`aws lambda add-permission` writes the statement AWS itself dicta
 `iam simulate-principal-policy` returns `allowed`); and SCPs (the account is in no
 organization). The account was created hours before the deployment and is pending activation.
 
-The deployment is real and testable over HTTP today, with a signature:
+**API Gateway is not subject to it**, and that is the fix. Both doors need a Lambda
+resource policy statement, but they are not the same grant: a Function URL needs
+`lambda:InvokeFunctionUrl` for an *anonymous* principal, evaluated by the Function URL
+front end — that is the grant this account withholds. API Gateway needs
+`lambda:InvokeFunction` for the *named service principal* `apigateway.amazonaws.com`,
+evaluated by the Lambda control plane, and it is honored normally. The two front doors are
+live side by side right now, on the same function, which makes the restriction
+demonstrable rather than merely asserted:
+
+| Front door on `axiom-api` | Anonymous `GET /api/health` |
+| --- | --- |
+| Function URL, auth `NONE` **and** a resource policy granting `Principal: "*"` | **403** |
+| HTTP API, `$default` route, same function, same moment | **200** |
+
+The function is also testable with the gateway out of the picture, over a signature:
 
 ```bash
 ./.venv/bin/python deploy/lambda/signed_curl.py /api/health
@@ -538,9 +576,9 @@ The deployment is real and testable over HTTP today, with a signature:
     -d '{"query":"refund policy for delayed orders","k":3}'
 ```
 
-Full method, cost table and the support-case text: [`deploy/lambda/README.md`](deploy/lambda/README.md).
-`deploy/free-tier/` is the fallback that uses no Lambda resource policy — one EC2 instance,
-~$10.40/month, written and not applied.
+Full method and cost table: [`deploy/lambda/README.md`](deploy/lambda/README.md).
+`deploy/free-tier/` was the fallback for a public URL — one EC2 instance, ~$10.40/month,
+written and never applied, and no longer needed.
 
 ---
 
@@ -557,11 +595,16 @@ The hackathon asks for a minimum of two of the four. Status is stated honestly p
 
 ## AWS services used
 
+The hackathon asks for a minimum of one. **Two of the five below are genuinely in the running
+system — Lambda and API Gateway.** The other three are listed because they exist in the
+account or in the repo, not because they are doing work, and each row says which.
+
 | Service | Status | How AXIOM uses it |
 | --- | --- | --- |
-| **AWS Lambda** | **Deployed and working; public URL blocked at the account level** | `axiom-api` (FastAPI behind Mangum, serving the API and the UI) and `axiom-worker`, both in `us-east-2`, both answering correctly to signed requests. Measurements and the 403 experiment above. 15 tests in `tests/test_lambda_worker.py` cover the worker handler. |
-| **Amazon Bedrock** | **Verified live in an earlier session, on a different AWS account** | `amazon.titan-embed-text-v2:0` returns the 1024-dimension embedding the schema's `VECTOR(1024)` pins (`axiom/embeddings.py`); `anthropic.claude-sonnet-4-5-20250929-v1:0` for exception triage (`axiom/llm.py`). **No model is enabled on the account the Lambda deployment runs in**, so those functions run `AXIOM_OFFLINE=1`, and every number in this README was measured offline with deterministic stand-ins. |
-| **CloudFront** | **Distribution exists, $0, does not solve the 403** | Created during the fallback attempt at a public front door. It costs nothing and `deploy.sh` re-probes it, so it starts working the moment the account restriction lifts. |
+| **AWS Lambda** | **Deployed, working, and public** | `axiom-api` (FastAPI behind Mangum, serving the API and the UI) and `axiom-worker`, both in `us-east-2`. Measurements and the Function-URL 403 experiment above. 15 tests in `tests/test_lambda_worker.py` cover the worker handler. |
+| **Amazon API Gateway** | **In use — this is the public URL** | HTTP API `axiom-api-http` (`nq0i2ob395`), payload format 2.0, one `$default` route to `axiom-api`, `$default` stage with auto-deploy, throttled to 20 req/s burst 40. It exists because this account blocks anonymous Function URLs and API Gateway is not subject to that restriction. [`deploy/lambda/apigateway.sh`](deploy/lambda/apigateway.sh). |
+| **Amazon Bedrock** | **Reachable and verified; not usable here — the quota is structurally zero** | `amazon.titan-embed-text-v2:0` returns the 1024-dimension embedding the schema's `VECTOR(1024)` pins (`axiom/embeddings.py`) and `anthropic.claude-sonnet-4-5` answers for triage (`axiom/llm.py`) — both confirmed live **from the deployment account**, not from a different one. Neither can be used: on-demand inference for Titan V2 is **0.0 requests/min and 0.0 tokens/min** (`L-26C560CE`, `Adjustable: false`, identical in `us-east-1`, `us-east-2`, `us-west-2`), and a sustained probe got 0 of 10 calls through in 87.4 s, all `ThrottlingException`. So both functions run `AXIOM_OFFLINE=1` and every number in this README was measured with the deterministic stand-in. See [Limitations](#limitations) for why batch inference was not used either. |
+| **CloudFront** | **Distribution exists, $0, superseded** | Created during the fallback attempt at a public front door; it did not solve the 403, because OAC is also a Function URL resource-policy grant. API Gateway made it unnecessary. It costs nothing, so it was left in place rather than spending 15 minutes on the disable-then-delete dance. |
 | **ECS Fargate / ALB / S3** | **Infrastructure written, never applied** | `Dockerfile`, `deploy/terraform/{ecs,alb,network,iam,logs}.tf`, `deploy/ecs/`. No cluster, service or task definition has been created. |
 
 ---
@@ -613,9 +656,24 @@ difference between a system you can reason about and a marketing claim.
 Stated plainly, because a limitations section that only lists comfortable limitations is a
 marketing document.
 
-- **No public demo URL.** The AWS deployment works and answers signed requests; anonymous
-  access is blocked at the account level, as documented above. That is a real gap in a
-  required deliverable, not a technicality.
+- **The AWS deployment is one build behind this README.** `scripts/uptime_check.sh` passes
+  6/6 against the gateway and `/api/health` serves the full payload, so the demo a judge
+  opens is working — but the ZIP predates the 2026-08-13 measurement corrections, so
+  `/api/proofs` still serves the older AWS table (four services, the pre-correction Bedrock
+  line) and Mission Control's footer therefore reads `1/4` where the table above reads 2 of
+  5. `build.sh` + `deploy.sh` fixes it without touching the gateway or changing the URL.
+  Details in [`deploy/lambda/README.md`](deploy/lambda/README.md).
+- **The AWS demo URL is not the one being monitored.** `.github/workflows/uptime.yml` checks
+  a URL every 30 minutes through the judging window and opens an issue when the demo stops
+  being *usable* rather than merely reachable — but its `BASE` is the Vercel deployment. The
+  AWS URL is live, anonymous and `$0.00/month`, so nothing lapses for non-payment, and it is
+  unwatched. Point `BASE` at whichever URL is submitted, or add a second job.
+- **The public demo's mutating controls are not token-gated.** `POST /api/demo/reset`,
+  `/seed` and `/run-worker` are reachable by anyone, deliberately: the UI's buttons call
+  them with no token and gating them would take those buttons away from a judge. Reset
+  re-seeds rather than empties, each route has a minimum interval (reset: 15 s), and
+  nothing there can create unbounded work — so a stranger can reset the board, not destroy
+  it. Set `AXIOM_DEMO_TOKEN` in the function's environment to close it.
 - **No CI.** The 178 tests pass on the local node (43 s); the 64 tests that predate the
   resilience suite also passed against CockroachDB Cloud (222 s). All seven crash windows
   have a test, but nothing runs them on every commit. "Passes when a
@@ -627,6 +685,28 @@ marketing document.
 - **Offline embeddings are a deterministic hash sketch**, not Titan. They preserve enough
   structure for recall ranking to be meaningful and for tests to be exact, but recall quality
   under `AXIOM_OFFLINE=1` is not evidence about recall quality under Titan V2.
+- **The corpus spent most of this project claiming a Titan embedding it never held.**
+  `axiom_memory.embedding_model` was `NOT NULL DEFAULT 'amazon.titan-embed-text-v2:0'` and no
+  insert path ever set it, so every row on the demo cluster said Titan while holding
+  blake2b sketches and test fixtures. Nothing computed a wrong answer — both sides of every
+  cosine comparison were the same embedder — but the table was stating something untrue about
+  itself, which in this project is its own kind of bug. Every row has now been reclassified
+  **by measurement** rather than by assumption: a row is the offline sketch if
+  `cos(stored, offline_embed(its own content)) > 0.99999`, and the test fixture if it
+  reproduces `sin(r*0.7 + d*0.013)` to `1e-6`. Zero rows matched neither, and the relabel was
+  written to refuse to run if any had. The corpus reads **11 × `offline-blake2b-sketch-v1`
+  and 2,500 × `synthetic-sine-fixture-v1`** — the second is `tests/test_recall_plan.py`'s
+  corpus, left on the demo cluster in its own tenant, which is what makes "the vector index
+  is still chosen at 2,500 rows" checkable on the live cluster rather than only locally.
+  `axiom/memory.py` now writes the model explicitly, `db/005_embedding_space.sql` drops the
+  default so forgetting it is an error rather than a lie, and `scripts/reembed.py` migrates
+  the corpus if the embedder ever changes.
+- **Bedrock batch inference was available and deliberately not used.** Batch is not subject to
+  the on-demand quota and would take 100,000 records per job — but it has a **minimum of 100
+  records**, and the real memory corpus is 10 distinct seed texts (5 `PRIOR_RECOVERIES` +
+  5 `PRIOR_SEMANTIC`). Padding a job with filler to clear that minimum would buy a "uses
+  Bedrock" checkbox by embedding meaningless strings. That is the species of overclaim this
+  project exists to argue against, so it was not done.
 - **The Cloud cluster is BASIC, single-region `aws-us-east-1`.** Latency and 40001 contention
   are real, but this is not a multi-region deployment: no `REGIONAL BY ROW`, no survival goal.
   Nothing here demonstrates surviving the loss of a region.
@@ -640,8 +720,14 @@ marketing document.
   misconfigured `FORCE RLS` returns zero rows *silently*, the worst possible failure mode to
   discover during a live demo. The tenant boundary today is `tenant_id NOT NULL` everywhere,
   leading every access-path index, with a mandatory predicate in every query.
-- **`POST /api/demo/reset` is unauthenticated and CORS is `allow_origins=['*']`.** Harmless on
-  a laptop; must be token-gated before any public URL exists.
+- **`POST /api/demo/reset` is unauthenticated, deliberately, and CORS is `allow_origins=['*']`.**
+  Two public URLs now exist, so this is a decision rather than a pending task, and it was
+  made in the judge's favour: Mission Control's RESET and RUN MISSION buttons send no
+  token, so gating the routes takes those buttons away from the person the demo is for.
+  The blast radius is bounded by design — reset re-seeds rather than empties, every route
+  has a minimum interval, and nothing here can create unbounded work. A stranger can
+  restart the board; a stranger cannot destroy it or run up a bill. Set `AXIOM_DEMO_TOKEN`
+  in the environment to close it, at the cost of the buttons.
 - **The LLM is a small part of this system, deliberately.** Triage proposes an action. It
   never mints a key, never decides whether it may act, and never sees the receipt table. If
   you are looking for prompt engineering, it is not here.

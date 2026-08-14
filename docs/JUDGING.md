@@ -72,7 +72,18 @@ The separation is enforced by the schema and the type system, not by convention:
 - **Offline embeddings are a deterministic hash sketch, not Titan.** They preserve enough
   structure for ranking to be meaningful and for tests to be exact. Recall *quality* under
   `AXIOM_OFFLINE=1` is not evidence about recall quality under Titan V2, and the headline
-  numbers were all measured offline.
+  numbers were all measured offline. Bedrock is reachable from the deployment account and
+  answers, but its on-demand quota there is 0.0 requests/minute and not adjustable — §4.
+- **Until 2026-08-13 the corpus said otherwise, and that was a defect.**
+  `axiom_memory.embedding_model` carried `NOT NULL DEFAULT 'amazon.titan-embed-text-v2:0'`
+  and no insert path ever set it, so every row claimed Titan while holding sketches and
+  fixtures. Every row has since been reclassified by *measurement* — the offline sketch if
+  `cos(stored, offline_embed(its own content)) > 0.99999`, the test fixture if it reproduces
+  `sin(r*0.7 + d*0.013)` to `1e-6`, and zero rows matched neither. The corpus now reads
+  11 × `offline-blake2b-sketch-v1` and 2,500 × `synthetic-sine-fixture-v1`, the latter being
+  `tests/test_recall_plan.py`'s corpus in its own tenant — which is what makes "the index is
+  still chosen at 2,500 rows" checkable on the live cluster. `db/005_embedding_space.sql`
+  drops the default, so forgetting the model is now an error rather than a lie.
 - **"Memory may only escalate" is a design decision, not a proven-optimal one.** It is the
   conservative choice. Nothing here measures what it costs in tasks that could have been
   completed automatically.
@@ -229,17 +240,29 @@ other four earn. It is stated first here rather than buried.
   `/api/crash-windows` and `POST /api/memories/recall` all answer 200. Full numbers and the
   method: `deploy/lambda/README.md`.
 - **Zero billable resources.** Lambda's 1M requests + 400,000 GB-s/month is an always-free
-  tier, not a 12-month offer. The ZIP is 11.2 MB, under the 50 MB direct-upload limit, so
-  there is no bucket, no ECR, no API Gateway, no ALB, no NAT.
+  tier, not a 12-month offer, and API Gateway's 1M HTTP-API requests/month is free for 12
+  months (to Aug 2027). The ZIP is 11.2 MB, under the 50 MB direct-upload limit, so there
+  is no bucket, no ECR, no ALB, no NAT.
 - **The engine, API, worker, Mission Control UI, audit agent, chaos harness and counterexample
   all run**, from a shell or from Lambda.
 
-### The blocker, stated plainly
+### The public URL, and the blocker it had to route around
 
-**There is no public demo URL, because this AWS account refuses anonymous access to Lambda
-Function URLs, and the refusal is account-level.** It is not the code. The controlled
-experiment — one function, one unchanged resource policy granting
-`lambda:InvokeFunctionUrl`:
+**https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/**
+
+```console
+$ curl https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/api/health
+{"ok":true,"db":true,"provider":true,"version":"0.1.0","offline":true,"errors":{}}
+```
+
+Anonymous, unsigned. An HTTP API in front of the same `axiom-api` Lambda, built by
+[`deploy/lambda/apigateway.sh`](../deploy/lambda/apigateway.sh).
+
+It is served through API Gateway rather than a Lambda Function URL for a reason worth
+stating, because the alternative is a judge finding the 403 themselves and drawing the
+wrong conclusion. **This AWS account refuses anonymous access to Lambda Function URLs,
+and the refusal is account-level.** It is not the code. The controlled experiment — one
+function, one unchanged resource policy granting `lambda:InvokeFunctionUrl`:
 
 | Setup | Result |
 | --- | --- |
@@ -257,7 +280,20 @@ writes the statement AWS itself dictates, and `iam simulate-principal-policy` re
 before the deployment and is pending activation; public Lambda URLs are an obvious abuse
 vector for a new account.
 
-**The deployment is still testable over HTTP today, with a signature:**
+**API Gateway is a different service and is not subject to that restriction.** Both front
+doors need a Lambda resource policy statement, but not the same grant: a Function URL needs
+`lambda:InvokeFunctionUrl` for an anonymous principal, evaluated by the Function URL front
+end, which is what this account withholds; API Gateway needs `lambda:InvokeFunction` for
+the named service principal `apigateway.amazonaws.com`, evaluated by the Lambda control
+plane, which is honored normally. Both doors are live on the same function right now, so
+the restriction is demonstrable rather than asserted:
+
+| Front door on `axiom-api` | Anonymous `GET /api/health` |
+| --- | --- |
+| Function URL, auth `NONE` **and** a resource policy granting `Principal: "*"` | **403** |
+| HTTP API, `$default` route, same function, same moment | **200** |
+
+**The function is also testable with the gateway out of the picture, over a signature:**
 
 ```bash
 ./.venv/bin/python deploy/lambda/signed_curl.py /api/health
@@ -265,17 +301,24 @@ vector for a new account.
     -d '{"query":"refund policy for delayed orders","k":3}'
 ```
 
-`deploy/free-tier/` is the fallback that does not depend on a Lambda resource policy: one EC2
-instance with a public IP, ~$10.40/month. It is written and not applied.
+`deploy/free-tier/` was the fallback that does not depend on a Lambda resource policy: one
+EC2 instance with a public IP, ~$10.40/month. Written, never applied, and no longer needed.
 
 ### The rest of the readiness gap
 
 - **No CI.** The 178 tests pass when a human runs them. "Passes when run" is weaker than
   "cannot regress", and that gap is exactly the property this project sells.
-- **No uptime monitor** on any URL, which the judging window (Aug 19 – Sep 15) requires.
-- **`POST /api/demo/reset` is unauthenticated** and CORS is `allow_origins=['*']`. Harmless
-  on a laptop, not harmless the moment anything is public. It must be token-gated or removed
-  before a URL exists.
+- **The AWS URL is not the monitored one.** `scripts/uptime_check.sh` asserts the demo is
+  *usable* rather than merely reachable and passes 6/6 against the gateway when run by hand,
+  and `.github/workflows/uptime.yml` runs it every 30 minutes through the judging window —
+  but its `BASE` points at the Vercel deployment, so a break in the AWS one during
+  Aug 19 – Sep 15 is silent. Point `BASE` at whichever URL is submitted, or add a second job.
+- **`POST /api/demo/reset` is unauthenticated** and CORS is `allow_origins=['*']`. This was
+  an open item until a public URL existed; two now do, so it is a decision, and it was made
+  in the judge's favour — Mission Control's buttons send no token, so gating the routes
+  removes RESET and RUN MISSION from the person the demo exists for. Bounded by design:
+  reset re-seeds rather than empties, each route has a minimum interval, none can create
+  unbounded work. `AXIOM_DEMO_TOKEN` closes it at the cost of the buttons.
 
 ---
 
@@ -346,7 +389,7 @@ touching a line of engine code — so that is where the remaining effort went.
 | 4 | `counterexample.py` claimed any claimable task in the tenant, so it crashed on a second run | Owned by the engine workstream — **confirm before submitting** |
 | 5 | One button in the UI did not reproduce the headline: `RUN MISSION` yielded 0 replays while the dashboard printed `DUPLICATE REFUNDS 0` above it | Owned by the UI workstream — **confirm before submitting** |
 | 6 | No CI | Not done. Stated as a limitation in §2 rather than papered over |
-| 7 | No reachable demo URL | Not solved. §4 states exactly why, with the controlled experiment |
+| 7 | No reachable demo URL | **Solved.** Public and anonymous at https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/ — the Function URL restriction was routed around with API Gateway, §4 |
 | 8 | Provider is simulated | Not done. Stated in §3 |
 
 ---
@@ -355,9 +398,11 @@ touching a line of engine code — so that is where the remaining effort went.
 
 Read this before going looking. Nothing below is a surprise to the authors.
 
-1. **There is no public demo URL.** It is a required deliverable and it is missing, for a
-   documented account-level reason that is not the code (§4). Some judges will score readiness
-   zero for it. That is a fair thing to do.
+1. **The AWS demo URL is unmonitored, and one region deep.** It is live and anonymous (§4)
+   and `$0.00/month`, so nothing lapses for non-payment — but `.github/workflows/uptime.yml`
+   points its `BASE` at the Vercel deployment, not at this URL, so if the AWS one breaks
+   during Aug 19 – Sep 15 it breaks silently. Gateway and function are both `us-east-2`
+   against a single-region `us-east-1` cluster; nothing here survives a region loss.
 2. **The provider is simulated.** The idempotency semantics are faithful and the provider is
    genuinely outside AXIOM's transaction, but no real money moved, so "0 duplicate refunds"
    is a statement about a database AXIOM does not write to — not about Stripe.
@@ -366,9 +411,15 @@ Read this before going looking. Nothing below is a surprise to the authors.
 4. **The headline numbers were measured with `AXIOM_OFFLINE=1`.** Deterministic embeddings and
    rule-based triage, no Bedrock in the loop, so the runs are hermetic and reproducible. That
    is the right call for a crash-safety measurement and it does mean the quoted runs are not
-   evidence about Titan-quality recall. Bedrock was verified live in an earlier session on a
-   different AWS account; **it is not enabled on the account the Lambda deployment runs in**,
-   which is why those functions run offline too.
+   evidence about Titan-quality recall. Bedrock is **enabled on the deployment account and
+   both models answer** — `amazon.titan-embed-text-v2:0` returns a real 1024-d vector and
+   `anthropic.claude-sonnet-4-5` replies — but the on-demand quota for Titan V2 is **0.0
+   requests/minute and 0.0 tokens/minute**, quota `L-26C560CE` with `Adjustable: false`, the
+   same in `us-east-1`, `us-east-2` and `us-west-2`. A sustained probe got 0 of 10 calls
+   through in 87.4 s, all `ThrottlingException`; isolated single calls do land, on a burst
+   allowance, which is why one probe looks like proof and is not. Batch inference is
+   available and was not used: its 100-record minimum against a 10-text corpus would have
+   meant embedding filler to earn the checkbox. So both Lambda functions run offline too.
 5. **One measured workload, one region, one cluster plan.** BASIC, single-region. Nothing here
    survives a region loss, and nothing here was run at a throughput that would test the
    sharding claims.

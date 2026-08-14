@@ -27,7 +27,8 @@
 #   NAT / VPC      a Lambda outside a VPC has internet access for free. Putting it in
 #                  one to reach CockroachDB Cloud would require a $32/month NAT gateway
 #                  to reach a public endpoint it can already reach.
-#   Bedrock        this account has no models enabled, so the functions run with
+#   Bedrock        models ARE enabled here and both answer, but the on-demand quota for
+#                  Titan V2 is 0.0 req/min and not adjustable, so the functions run with
 #                  AXIOM_OFFLINE=1 and the role is granted no bedrock:* at all.
 #
 # Lambda's 1M requests + 400,000 GB-seconds per month is an ALWAYS-free allowance, not a
@@ -134,9 +135,10 @@ python3 - "$TMPDIR_RUN/env.json" <<PY
 import json, os, sys
 env = {
     'DATABASE_URL': os.environ['DATABASE_URL'],
-    # No Bedrock models are enabled on this account. Offline swaps the embedder and the
-    # LLM for deterministic local stand-ins; the engine cannot tell the difference, which
-    # is the point of the provider interfaces.
+    # Bedrock's on-demand quota on this account is 0.0 requests/minute and AWS marks it
+    # non-adjustable, so it cannot serve a request loop even though the models answer.
+    # Offline swaps the embedder and the LLM for deterministic local stand-ins; the engine
+    # cannot tell the difference, which is the point of the provider interfaces.
     'AXIOM_OFFLINE': '1',
     # CockroachDB Cloud BASIC is signed by a CA that is in no system trust store, and
     # sslrootcert=system does not work either. build.sh puts the cluster cert in the ZIP;

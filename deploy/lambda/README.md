@@ -7,7 +7,8 @@ rest, and nothing in it is a 12-month introductory offer.
 ./deploy/lambda/build.sh                      # -> build/axiom-lambda.zip (11.2 MB)
 export AWS_PROFILE=axiom
 export DATABASE_URL='postgresql://axiom_app:...@...cockroachlabs.cloud:26257/axiom?sslmode=verify-full&connect_timeout=5'
-./deploy/lambda/deploy.sh                     # creates/updates everything, prints the URL
+./deploy/lambda/deploy.sh                     # creates/updates both functions
+./deploy/lambda/apigateway.sh                 # the public URL, and prints it
 ```
 
 | File | What it is |
@@ -17,7 +18,62 @@ export DATABASE_URL='postgresql://axiom_app:...@...cockroachlabs.cloud:26257/axi
 | `requirements-lambda.txt` | what goes in the ZIP — smaller than `requirements.txt`, and the comments say why |
 | `build.sh` | cross-platform wheel build, ELF verification, trim, precompile, zip |
 | `deploy.sh` | IAM role, both functions, the Function URL, the public front door, smoke test |
+| `apigateway.sh` | **the public front door that actually works on this account.** HTTP API, `$default` route, `$default` stage, throttle, invoke permission, smoke test. Idempotent; `--destroy` removes it. |
 | `signed_curl.py` | curl the deployed URL with a SigV4 signature |
+
+## The public URL
+
+```
+https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/
+```
+
+```console
+$ curl https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/api/health
+{"ok":true,"db":true,"provider":true,"version":"0.1.0","offline":true,"errors":{}}
+```
+
+Anonymous, no signature, no credentials in the environment. `/`, `/styles.css`,
+`/api/mission`, `/api/crash-windows`, `/api/docs` and `POST /api/memories/recall` all
+answer 200 through it.
+
+### ⚠ The deployed ZIP is stale — rebuild before submitting
+
+The gateway is current; **the code behind it is not.** The function is still running the
+ZIP built 2026-08-11, and `axiom/api.py` has roughly doubled since:
+
+| | `axiom/api.py` |
+| --- | --- |
+| inside `build/axiom-lambda.zip` | 40,945 bytes, 2026-08-11 |
+| in the repo | 79,657 bytes, 2026-08-13 |
+
+The visible symptom is the health payload. The current code returns `status`, `checks{}`,
+`booted_at` and `uptime_seconds`; the deployed function returns only the old
+`{"ok":true,"db":true,"provider":true,...}`. That is enough to fail this repo's own
+usability check, which asserts `status == "ok"`:
+
+```console
+$ bash scripts/uptime_check.sh https://nq0i2ob395.execute-api.us-east-2.amazonaws.com
+  health                             status=          <- fails
+  database                           reachable
+  provider                           reachable
+  mission present                    Resolve today's order exceptions
+  duplicate effects                  0
+  vector index                       used (not a scan)
+  FAILING — intervene before a judge sees it.
+```
+
+Everything below that line passes, so this is a stale build rather than a broken
+deployment — but a judge comparing the AWS URL to the Vercel one would find them running
+different versions of the app. The fix is the normal redeploy, and it does not touch the
+gateway or change the URL:
+
+```bash
+./deploy/lambda/build.sh
+DATABASE_URL='…' ./deploy/lambda/deploy.sh
+bash scripts/uptime_check.sh https://nq0i2ob395.execute-api.us-east-2.amazonaws.com
+```
+
+Budget real time for it: the upload is ~11 MB and took 6 m 41 s on a home uplink.
 
 ## What it costs
 
@@ -28,7 +84,14 @@ export DATABASE_URL='postgresql://axiom_app:...@...cockroachlabs.cloud:26257/axi
 | Function URL | $0.00 | — | free, always |
 | CloudFront (fallback front door) | $0.085/GB | **1 TB + 10M requests/month, always free** | free at any demo volume |
 | CloudWatch Logs | $0.50/GB ingest | 5 GB/month | 7-day retention, a few MB |
-| ECR / S3 / API Gateway / ALB / NAT | — | — | **not used.** The ZIP is 11.2 MB, under the 50 MB direct-upload limit, so there is nothing to put in a bucket. |
+| API Gateway (HTTP API) | $1.00 / million | **1M requests/month, free for 12 months** | the public front door. See below for why it is here after all. Throttled to 20 req/s. |
+| ECR / S3 / ALB / NAT | — | — | **not used.** The ZIP is 11.2 MB, under the 50 MB direct-upload limit, so there is nothing to put in a bucket. |
+
+API Gateway's allowance is a 12-month offer rather than an always-free one, which is why
+`deploy.sh` preferred a Function URL and says so in its header. That reasoning was right
+about the cost and wrong about this account. The offer runs to Aug 2027, the demo has to
+live until Sep 15 2026, and an HTTP API with no traffic bills $0.00 — so the standing
+cost of the whole deployment is still zero.
 
 The request count is the binding limit, not compute — by about 4.7x. See the sizing
 table in `handler_api.py`, which is measured, not estimated.
@@ -61,11 +124,31 @@ deployed function. The UI is served out of `/var/task/web` by the same `StaticFi
 mount the container uses, which is why this deployment needs no bucket and no CDN
 origin of its own.
 
-## The one thing that is not working, and it is not the code
+## The account restriction, and the way around it
 
 **This AWS account refuses anonymous access to Lambda Function URLs, and the refusal is
-account-level.** Deployed, the API answers every request correctly to a signed caller and
-403s an unsigned one.
+account-level.** That is still true, and it is still observable right now: the Function
+URL is configured as publicly as AWS allows — auth type `NONE`, plus a resource policy
+granting `Principal: "*"` — and it 403s an anonymous caller, while the *same function,
+at the same moment,* answers 200 through the HTTP API. Two front doors, one Lambda:
+
+```console
+$ curl -o /dev/null -w '%{http_code}\n' https://a4ozyrv3noyq4ziekjzvdfdeqi0zjcgn.lambda-url.us-east-2.on.aws/api/health
+403
+$ curl -o /dev/null -w '%{http_code}\n' https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/api/health
+200
+```
+
+The restriction is specific to Function URLs, and API Gateway is not subject to it. Both
+doors need a Lambda resource policy statement, but they are not the same grant: the
+Function URL needs `lambda:InvokeFunctionUrl` for an anonymous principal, evaluated by
+the Function URL front end, and that is what this account withholds. API Gateway needs
+`lambda:InvokeFunction` for the named service principal `apigateway.amazonaws.com`,
+evaluated by the Lambda control plane, and that is honored normally. `apigateway.sh`
+is nothing more than that observation, written down and made re-runnable.
+
+The rest of this section is the original diagnosis, kept because it is what ruled the
+Function URL out and it is how the finding above was reached.
 
 The controlled experiment — one IAM role, one function, one unchanged resource-policy
 statement granting it `lambda:InvokeFunctionUrl`:
@@ -96,20 +179,24 @@ operation exists anywhere in the Lambda service model** — checked against boto
 
 ### What to do about it
 
-1. **Open an AWS Support case** (free on Basic support): Account and billing →
+1. **`./deploy/lambda/apigateway.sh`.** This is the answer, it costs nothing, and it
+   needs no one at AWS to do anything. It is what serves the public URL today.
+2. **Optionally, an AWS Support case** (free on Basic support): Account and billing →
    "Lambda function URL public access is denied on account 034971967323 despite a correct
    resource-based policy; anonymous requests return 403 AccessDeniedException while SigV4
-   requests succeed." When it is resolved, run `FRONT=reprobe ./deploy/lambda/deploy.sh`.
-   It re-tests and switches to the public URL on its own, with no edit to any file.
-2. **Meanwhile the deployment is real and testable over HTTP:**
+   requests succeed." If it is ever resolved, `FRONT=reprobe ./deploy/lambda/deploy.sh`
+   re-tests and switches to the Function URL, removing one hop and one service. Nothing
+   depends on this happening.
+3. **The signed path still works**, and is the way to test the function itself with the
+   gateway out of the picture:
    ```
    ./.venv/bin/python deploy/lambda/signed_curl.py /api/health
    ./.venv/bin/python deploy/lambda/signed_curl.py -X POST /api/memories/recall \
        -d '{"query":"refund policy for delayed orders","k":3}'
    ```
-3. **`deploy/free-tier/`** (one EC2 instance, ~$10.40/month) uses no Lambda resource
-   policy and is unaffected by any of this. It is the fallback that does not depend on
-   AWS changing its mind before Aug 18.
+4. **`deploy/free-tier/`** (one EC2 instance, ~$10.40/month) uses no Lambda resource
+   policy and is unaffected by any of this. It was the fallback for a public URL and is
+   no longer needed for that; it remains written and unapplied.
 
 `deploy.sh` prints all of this at the end of a run rather than reporting success and
 leaving a judge to discover the 403.
@@ -135,8 +222,13 @@ leaving a judge to discover the 403.
   on a public URL — at 512 MB the worst possible burn is 5 GB-s per wall-clock second.
   No reserved concurrency is set, because reserving any of 10 would drop unreserved
   concurrency below the minimum of 10 that AWS enforces.
-* **Bedrock is not used and not permitted.** No model is enabled on this account, so both
-  functions run `AXIOM_OFFLINE=1` and the execution role is granted no `bedrock:*`.
+* **Bedrock is not used and not permitted.** Model access **is** enabled on this account and
+  both models answer a single call — what is missing is throughput: on-demand inference for
+  Titan Text Embeddings V2 is 0.0 requests/minute and 0.0 tokens/minute (quota `L-26C560CE`,
+  `Adjustable: false`, the same in `us-east-1`, `us-east-2` and `us-west-2`), and a sustained
+  probe got 0 of 10 calls through in 87.4 s, all `ThrottlingException`. Single calls do land
+  on a burst allowance, which is why one probe is not a capability check. So both functions
+  run `AXIOM_OFFLINE=1` and the execution role is granted no `bedrock:*`.
 * **A CloudFront distribution exists** (`E16IJKGYV79WU6`, `d3rlxycj556sia.cloudfront.net`)
   from the fallback attempt. It costs $0 and `deploy.sh` reuses and re-probes it, so it
   starts working the moment the account restriction is lifted. To remove it instead:

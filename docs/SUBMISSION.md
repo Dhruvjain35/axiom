@@ -148,8 +148,10 @@ where no crash landed in the dangerous window proved nothing.
 
 **Stack:** CockroachDB Cloud v26.2.5 (SERIALIZABLE, C-SPANN vector indexes, `AS OF SYSTEM
 TIME`), provisioned and migrated with the `ccloud` CLI; Python 3.14 / psycopg3; AWS Lambda
-(two arm64 functions, $0, deployed and working); Amazon Bedrock (Titan Text Embeddings V2 at
-1024 dimensions, Claude Sonnet for triage); vanilla-JS Mission Control with no build step.
+(two arm64 functions, $0, deployed and working) behind an Amazon API Gateway HTTP API (the
+public URL, $0); embeddings from a deterministic 1024-dimension local sketch, with Bedrock
+Titan V2 behind the same interface and unusable on this account (§7); vanilla-JS Mission
+Control with no build step.
 
 ---
 
@@ -192,11 +194,37 @@ mid-run and truncating the provider ledger. The final numbers were re-measured o
 cluster. Worth recording, because the instinct on seeing that discrepancy was to doubt the
 design, and the correct move was to go and find out.
 
-**A public Lambda URL that AWS will not grant.** The deployment works; anonymous access to its
-Function URL returns 403, and a controlled experiment (identity policy on → 200, identity
-policy off with the resource policy unchanged → 403, reproduced on a throwaway hello-world
-function in two regions) shows the refusal is account-level on an account created hours
-earlier, not a defect in the code or the policy. Documented rather than hidden — see §7.
+**A public Lambda URL that AWS will not grant — and the door that was not locked.** Anonymous
+access to the Function URL returns 403, and a controlled experiment (identity policy on → 200,
+identity policy off with the resource policy unchanged → 403, reproduced on a throwaway
+hello-world function in two regions) showed the refusal is account-level on an account created
+hours earlier, not a defect in the code or the policy. The mistake was treating that as a
+verdict on public access rather than on one service: API Gateway needs a different grant
+(`lambda:InvokeFunction` for a named service principal, not `lambda:InvokeFunctionUrl` for an
+anonymous one) and is not subject to the restriction at all. Testing that took one throwaway
+HTTP API and one curl. The demo has been public ever since — see §7.
+
+**Bedrock was reachable, answered, and still could not be used — and the first explanation we
+gave for that was wrong.** The account was written up as having no model access. It has model
+access; both models answer. What it does not have is throughput: on-demand inference for Titan
+Text Embeddings V2 is 0.0 requests per minute on a quota AWS marks `Adjustable: false`, in
+every region checked. The reason this took a while to see is that isolated single calls
+succeed, on a burst allowance — so the probe that was supposed to settle the question kept
+returning a real 1024-dimension vector. Ten calls in a row is the test that decides it: 0 of
+10 in 87.4 s, all `ThrottlingException`. *A capability check that runs once measures the burst
+allowance, not the quota.*
+
+**The memory table claimed a Titan embedding it never held.**
+`axiom_memory.embedding_model` was declared `NOT NULL DEFAULT 'amazon.titan-embed-text-v2:0'`
+and no insert path ever set it, so every row on the demo cluster asserted Titan V2 while
+holding blake2b sketches and test fixtures. Nothing computed a wrong answer — both sides of
+every cosine comparison were the same embedder — but a column default had been quietly
+authoring a claim nobody wrote, in the one project whose entire thesis is that it does not
+overclaim. Every row was reclassified **by measurement**, not by assumption: a row is the
+offline sketch if `cos(stored, offline_embed(its own content)) > 0.99999`, the test fixture if
+it reproduces `sin(r*0.7 + d*0.013)` to `1e-6`, and the relabel was written to refuse to run
+if a single row matched neither. None did. *A `DEFAULT` on a provenance column is a claim with
+a schema behind it and nobody's name on it.*
 
 ---
 
@@ -263,18 +291,33 @@ The form requires a minimum of two of four.
 | **ccloud CLI** | **In use, verified** | The cluster every measured result ran on (`axiom-memory`, BASIC, AWS `us-east-1`, v26.2.5) is administered entirely through `ccloud`: `auth login`, `cluster list`, `cluster user create axiom_app`, `cluster connection-string`. `scripts/provision_ccloud.sh` wraps provisioning plus all three migrations. |
 | **Agent Skills Repo** | **Skill written and validated; no PR opened** | `skills/cockroachdb-application-development/implementing-crash-safe-work-queues/` — 390 lines capturing the pattern this project proves: partial claim index, explicit shard column over `USING HASH`, fencing token over lease, never `DELETE`, `GENERATED STORED` idempotency key, receipt-before-call. Laid out to match `cockroachlabs/cockroachdb-skills` exactly and passes their own `scripts/validate-spec.py --strict` with zero errors and zero warnings. Their `CONTRIBUTING.md` asks contributors to propose in an issue and agree scope with maintainers first, so the PR is not open. |
 
-### AWS services used
+### AWS services used — 2 genuinely in use, of 5 listed
+
+The form requires a minimum of one. Lambda and API Gateway are in the running system; the
+other three are listed as what they are, and each row says so.
 
 | Service | Status | Use |
 | --- | --- | --- |
-| **AWS Lambda** | **Deployed and working; anonymous URL blocked at the account level** | `axiom-api` (FastAPI behind Mangum, serving both the API and Mission Control from `/var/task/web`) and `axiom-worker`, `us-east-2`, arm64, python3.13, 512 MB, against CockroachDB Cloud in `us-east-1`. Cold start `INIT` 1447–2258 ms; warm `/api/health` 169 ms across two cross-region queries; `/api/crash-windows` 2.7 ms; peak 149 MB of 512. Freeze/thaw tested at 17 s / 30 s / 73 s / 220 s / 14 min — no 500 in any state. 15 tests cover the worker handler. **$0**: the always-free tier is 1M requests + 400,000 GB-s/month and the 11.2 MB ZIP is under the direct-upload limit, so there is no S3, ECR, API Gateway, ALB or NAT. |
-| **Amazon Bedrock** | **Verified live in an earlier session, on a different AWS account** | `amazon.titan-embed-text-v2:0` returns the 1024-dimension embedding the schema's `VECTOR(1024)` pins (`axiom/embeddings.py`); `anthropic.claude-sonnet-4-5-20250929-v1:0` for exception triage (`axiom/llm.py`). No model is enabled on the account the Lambda deployment runs in, so those functions run `AXIOM_OFFLINE=1` — and every quoted measurement used deterministic offline stand-ins, which is what makes the crash-safety runs hermetic and reproducible. |
-| **CloudFront** | **Distribution exists, $0, does not solve the 403** | Created attempting a public front door via Origin Access Control. Costs nothing and `deploy.sh` re-probes it, so it works the moment the account restriction lifts. |
+| **AWS Lambda** | **Deployed, working, and public** | `axiom-api` (FastAPI behind Mangum, serving both the API and Mission Control from `/var/task/web`) and `axiom-worker`, `us-east-2`, arm64, python3.13, 512 MB, against CockroachDB Cloud in `us-east-1`. Cold start `INIT` 1447–2258 ms; warm `/api/health` 169 ms across two cross-region queries; `/api/crash-windows` 2.7 ms; peak 149 MB of 512. Freeze/thaw tested at 17 s / 30 s / 73 s / 220 s / 14 min — no 500 in any state. 15 tests cover the worker handler. **$0**: the always-free tier is 1M requests + 400,000 GB-s/month and the 11.2 MB ZIP is under the direct-upload limit, so there is no S3, ECR, ALB or NAT. |
+| **Amazon API Gateway** | **In use — this is the public demo URL** | HTTP API `axiom-api-http` (`nq0i2ob395`, `us-east-2`), payload format 2.0, one `$default` route to `axiom-api`, `$default` stage with auto-deploy, throttled to 20 req/s burst 40 so a crawler cannot run up a bill. It exists because this account blocks anonymous Lambda Function URLs and API Gateway is not subject to that restriction. **$0**: 1M HTTP-API requests/month free for 12 months (to Aug 2027), and an idle API bills nothing. Reproducible from `deploy/lambda/apigateway.sh`, which is idempotent and takes `--destroy`. |
+| **Amazon Bedrock** | **Reachable and verified from this account; NOT USABLE — the quota is structurally zero** | Model access **is** enabled on the deployment account and both models answer: `amazon.titan-embed-text-v2:0` returns the 1024-dimension embedding the schema's `VECTOR(1024)` pins (`axiom/embeddings.py`), and `anthropic.claude-sonnet-4-5` replies for exception triage (`axiom/llm.py`). Neither can be used. On-demand inference for Titan V2 is **0.0 requests/minute and 0.0 tokens/minute** — quota `L-26C560CE`, **`Adjustable: false`**, so it cannot be raised by request — and it reads 0.0 in `us-east-1`, `us-east-2` and `us-west-2` alike (`aws service-quotas list-service-quotas --service-code bedrock`). A sustained probe got **0 of 10 calls through in 87.4 s, every one a `ThrottlingException`**. Isolated single calls do sometimes succeed on a burst allowance, which is precisely why a one-off probe looks like proof and is not. **Batch inference is available and was deliberately not used**: it takes 100,000 records per job but requires a minimum of 100, and the real memory corpus is 10 distinct seed texts — padding it to clear the minimum would buy the checkbox by embedding meaningless strings. So both functions run `AXIOM_OFFLINE=1`, every quoted measurement used the deterministic stand-in, and every `axiom_memory` row now names the space it is actually in. |
+| **CloudFront** | **Distribution exists, $0, superseded by API Gateway** | Created attempting a public front door via Origin Access Control, which did not solve the 403 because OAC is also a Function URL resource-policy grant. Costs nothing, so it was left in place. |
 | **ECS Fargate / ALB / S3** | **Infrastructure written, never applied** | `Dockerfile`, `deploy/terraform/{ecs,alb,network,iam,logs}.tf`, `deploy/ecs/`. No cluster, service or task definition has been created. |
 
 ### The public URL — state this plainly on the form
 
-The AWS deployment is real and works. **This AWS account refuses anonymous access to Lambda
+**https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/**
+
+```console
+$ curl https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/api/health
+{"ok":true,"db":true,"provider":true,"version":"0.1.0","offline":true,"errors":{}}
+```
+
+Anonymous, unsigned, `$0.00/month`. It is served through API Gateway rather than a Lambda
+Function URL, and that detail is worth one line on the form because a judge who finds the
+403 on the Function URL should not conclude the deployment is broken.
+
+**This AWS account refuses anonymous access to Lambda
 Function URLs, and the refusal is account-level, not a defect in the policy.** The controlled
 experiment: one function, one unchanged resource-policy statement granting
 `lambda:InvokeFunctionUrl` — a role *with* a matching identity policy gets **200**; the same
@@ -285,7 +328,18 @@ minutes), policy syntax (`aws lambda add-permission` writes the statement AWS it
 and `iam simulate-principal-policy` returns `allowed`), and SCPs (the account is in no
 organization). The account was created hours before the deployment and is pending activation.
 
-It answers signed HTTP requests today:
+**API Gateway needs a different grant and is not subject to any of that**: `lambda:Invoke`
+`Function` for the named service principal `apigateway.amazonaws.com`, evaluated by the
+Lambda control plane, rather than `lambda:InvokeFunctionUrl` for an anonymous principal,
+evaluated by the Function URL front end. Both doors are live on the same function, which
+makes the restriction demonstrable rather than merely asserted:
+
+| Front door on `axiom-api` | Anonymous `GET /api/health` |
+| --- | --- |
+| Function URL, auth `NONE` **and** a resource policy granting `Principal: "*"` | **403** |
+| HTTP API, `$default` route, same function, same moment | **200** |
+
+The function also answers signed HTTP requests directly, with the gateway out of the picture:
 
 ```bash
 ./.venv/bin/python deploy/lambda/signed_curl.py /api/health
@@ -296,9 +350,10 @@ It answers signed HTTP requests today:
 - **Repository:** https://github.com/Dhruvjain35/axiom — public, Apache-2.0 (`LICENSE`
   present). The "newly created during the submission period" rule is evidenced by the commit
   history.
-- **Demo URL:** *(fill in if the free-tier EC2 path lands, or the AWS restriction lifts and
-  `FRONT=reprobe ./deploy/lambda/deploy.sh` flips it. If neither, submit with the honest
-  statement above rather than a URL that 403s a judge.)*
+- **Demo URL:** **https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/** — live, anonymous,
+  `$0.00/month`, must stay up through Sep 15. Re-create with
+  `./deploy/lambda/apigateway.sh` if it is ever torn down; the URL changes if the API is
+  recreated, so tear it down only deliberately.
 - **Video:** *(under 3:00 — shot list in §9.)*
 
 ---
@@ -310,14 +365,16 @@ Ordered by how badly it hurts to get it wrong.
 ```
 [ ] Repo public, history intact, LICENSE present                       — DONE
 [ ] ≥2 CockroachDB tools genuinely used, §7 true on the day            — 3 in use, 4th written
-[ ] ≥1 AWS service genuinely used                                      — Lambda deployed, Bedrock verified
+[ ] ≥1 AWS service genuinely used                                      — 2 of 5: Lambda + API Gateway
 [ ] Video recorded, UNDER 3:00, link tested in a logged-out browser
 [ ] Video says "effectively-once, not exactly-once" OUT LOUD
 [ ] Video shows a worker being SIGKILLed on camera
 [ ] Video shows the PROVIDER's ledger for the duplicate check, not AXIOM's
 [ ] Numbers on screen re-measured on the cluster shown in the video
-[ ] Demo URL live, or the 403 stated plainly on the form
-[ ] /api/demo/reset token-gated BEFORE any public URL exists
+[ ] Demo URL live                                                      — DONE, apigatewayv2
+[ ] /api/demo/reset: DECIDE. Public and ungated today (deliberate — the
+    UI's buttons need it). Set AXIOM_DEMO_TOKEN to close it, and accept
+    that RESET/RUN MISSION stop working for a judge if you do.
 [ ] Uptime check on whatever URL is submitted, alerting through Sep 15
 [ ] README / SUBMISSION / JUDGING agree on every number                — DONE 2026-08-11
 [ ] Submit a day early
@@ -332,12 +389,15 @@ no logo intro, no team introduction, no roadmap. The system on screen, doing the
 
 ### Before you hit record
 
-**Record against the deployed system if a URL is reachable by then.** If it is not — which is
-the likely case — **record locally and say so once, in one sentence, without apologising**:
+**Record against the deployed system.** There is a public URL now —
+https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/ — so the browser pane should be
+pointed at it rather than at localhost, and the address bar is worth one deliberate beat
+on camera. The one thing the deployment cannot do on film is the SIGKILL: you cannot
+`kill -9` a Lambda invocation, so the crash demo is still driven through
+`POST /api/demo/run-worker {mode:chaos}`, which kills the worker at W4 inside the
+invocation. If you record the SIGKILL locally instead, say so once, without apologising:
 
 > "This is running locally against CockroachDB Cloud; the same code is deployed on AWS Lambda."
-
-That is true, it takes two seconds, and it is far better than a judge suspecting it.
 
 **Terminal setup.** Two panes, side by side, same window. Font at a size that is legible at
 720p — test it by recording ten seconds and watching it at 720p before you record the real

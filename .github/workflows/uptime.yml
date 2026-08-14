@@ -1,0 +1,266 @@
+name: uptime
+
+# invariants.yml proves the code cannot regress. This proves the DEMO cannot quietly die.
+#
+# Judging runs Aug 19 - Sep 15 2026 and nobody is watching the deployment during it. The
+# failure this guards against is not "the site is down" — any free pinger catches a 500 or
+# a timeout, and that failure is loud. It is the quiet one, where the page still returns
+# 200 and is USELESS:
+#
+#   - the serverless function is up but CockroachDB is unreachable, so every board is empty
+#   - the demo tenant got wiped and never re-seeded, so there is no mission to look at
+#   - duplicate effects appeared, so the single claim the whole project rests on is false
+#   - the vector index silently stopped being CHOSEN by the optimizer and recall degraded
+#     to a full scan — which returns the exact same correct rows on demo-sized data and is
+#     therefore invisible to literally every other signal
+#
+# A judge who opens that sees a dead board, concludes the project does not work, and there
+# is no second look and no email asking whether something was wrong. scripts/uptime_check.sh
+# already asserts USABLE rather than merely reachable. This file is the part that actually
+# runs it unattended and puts a failure somewhere a human will see it.
+#
+# Why GitHub Actions and not a Vercel cron, which tooling will keep suggesting: a Vercel
+# cron runs INSIDE the deployment being watched. When the deployment is broken — which is
+# the entire event of interest — the cron is broken too, and reports nothing. A monitor has
+# to be able to outlive the thing it monitors, so it runs on separate infrastructure, from
+# outside, over the public URL, exactly the way a judge reaches it.
+
+on:
+  schedule:
+    # Every 30 minutes, deliberately off the hour. GitHub runs cron on a shared pool and
+    # drops or delays runs when it is contended; :00 and :30 are the most contended slots
+    # on the platform, so `*/30` is the phrasing most likely to be skipped. :07 and :37 are
+    # the same cadence somewhere quieter.
+    #
+    # SCHEDULE LIFETIME — the thing that silently kills workflows like this: GitHub
+    # disables a scheduled workflow after 60 days with no repository activity (it emails
+    # the owner a re-enable link when it does). Last commit here is 2026-08-13, so the
+    # 60-day clock expires 2026-10-12 — 27 days AFTER judging closes on 2026-09-15. The
+    # schedule covers the entire judging window with no further commits required. If this
+    # repo goes quiet for two months afterward and the checks stop, that is why, and it is
+    # fine by then.
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  # Repo-wide, not per-ref like invariants.yml: there is exactly one production deployment,
+  # so there is exactly one thing to check.
+  #
+  # cancel-in-progress is FALSE here, the opposite of invariants.yml, and that inversion is
+  # deliberate. A cancelled uptime check reports nothing at all, and a missed window is the
+  # precise outcome this file exists to prevent — whereas a cancelled test run just runs
+  # again. Queueing also serializes the issue bookkeeping below: two concurrent runs could
+  # each look, each find no open issue, and each open one. That is how a monitor turns into
+  # a hundred duplicate issues.
+  group: uptime
+  cancel-in-progress: false
+
+permissions:
+  # Everything this checks is public — the health endpoint, the mission board, the
+  # provider's own ledger, the query plan. No DATABASE_URL, no AWS keys, no secrets of any
+  # kind. If this workflow ever appears to need one, the design is wrong: it should be
+  # checking what a judge can see, and a judge has no secrets either.
+  #
+  # The one write it needs is filing the alert. GITHUB_TOKEN is minted per-run by Actions
+  # and discarded after; nothing to configure, nothing to rotate, nothing a fork can steal.
+  #
+  # This block is load-bearing, not decoration. This repo's default workflow token
+  # permission is READ (checked: /actions/permissions/workflow -> "read"), so without
+  # `issues: write` spelled out here the alert step would 403 and the demo could die in
+  # silence with the monitor reporting nothing. Granting above a restricted default is the
+  # documented purpose of this key. The only case it cannot elevate is a workflow triggered
+  # from a fork's pull request, which is not how this one runs.
+  contents: read
+  issues: write
+
+env:
+  # The single place the target lives. To exercise the alerting end to end: point this at
+  # something that returns 200 and is not AXIOM (https://example.com does it — every check
+  # fails), dispatch from the Actions tab, confirm the issue opens, then revert and
+  # dispatch again to confirm it closes itself.
+  BASE: https://axiom-one-sage.vercel.app
+  ISSUE_LABEL: uptime
+  ISSUE_TITLE: 'AXIOM demo is not usable'
+
+jobs:
+  uptime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that a judge would see a working demo
+        id: check
+        # No setup-python, no pip install, no service container — unlike invariants.yml,
+        # which needs a real CockroachDB. This needs curl and python3, and ubuntu-latest
+        # ships both. Nothing to install is nothing that can break during a month of
+        # unattended runs; a monitor whose dependencies rot is worse than no monitor.
+        #
+        # timeout-minutes lives on the STEP, not only on the job. If the check wedges, a
+        # step timeout fails just this step and the alerting steps below still run, so a
+        # hang still files an issue. A job-level timeout would kill the alerting along with
+        # the check and the failure would go unreported — the exact silence being designed
+        # against. The script's own budget is bounded anyway: 3 retries x 45s per endpoint,
+        # because a cold serverless container plus a first DB connection is slow but not
+        # broken, and an alert that fires on cold starts gets muted by week two.
+        timeout-minutes: 12
+        run: |
+          set +e
+          set -o pipefail
+          bash scripts/uptime_check.sh "$BASE" 2>&1 | tee /tmp/uptime.raw
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+          # The script marks a failed check by coloring it red and by nothing else, so the
+          # ANSI escape IS the machine-readable signal. Read it first, then strip it so the
+          # issue body is legible.
+          python3 - <<'PY'
+          import pathlib, re
+          raw = pathlib.Path('/tmp/uptime.raw').read_text(errors='replace')
+          pathlib.Path('/tmp/uptime.log').write_text(re.sub(r'\x1b\[[0-9;]*m', '', raw))
+          failed = sorted({l.split('\x1b[31m')[0].strip() for l in raw.splitlines() if '\x1b[31m' in l})
+          pathlib.Path('/tmp/uptime.sig').write_text(', '.join(failed) or 'unknown')
+          PY
+
+          # Put the result on the run page itself, so the Actions tab answers "was the demo
+          # up all month" without opening any individual run.
+          {
+            echo '```'
+            cat /tmp/uptime.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      - name: File or refresh the alert issue
+        # Note this is `!= '0'`, not `== '1'`. If the check step timed out or died before
+        # writing its output, `code` is the empty string, which is not '0', so the alert
+        # still fires. Unknown is treated as broken. For something nobody is watching, that
+        # is the only safe direction to round.
+        if: steps.check.outputs.code != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          NOW="$(date -u '+%Y-%m-%d %H:%M UTC')"
+          SIG="$(cat /tmp/uptime.sig 2>/dev/null || echo 'check never finished')"
+          MARKER="<!-- axiom-uptime-signature: $SIG -->"
+
+          # Idempotent: --force updates an existing label rather than failing on it.
+          # This matters because `gh issue create --label` hard-errors on a label that does
+          # not exist, which would mean the very first failure files nothing at all.
+          gh label create "$ISSUE_LABEL" --color B60205 --force \
+            --description 'The live demo failed its usability check' >/dev/null 2>&1 || true
+
+          # Find the open alert by LABEL, not by `gh search`. Search hits GitHub's search
+          # index, which lags writes by up to a minute or so; a label filter is a direct
+          # REST list and is consistent immediately. At a 30-minute cadence the lag would
+          # usually be survivable — but "usually" is how you get a hundred duplicate issues
+          # over a month, and the duplicates would themselves be a failure mode.
+          #
+          # No `|| true` on this one on purpose: if the API call fails, this step fails and
+          # nothing is filed, which is strictly better than assuming "nothing open" and
+          # opening a second issue every half hour.
+          NUM="$(gh issue list --label "$ISSUE_LABEL" --state open --limit 1 \
+                   --json number --jq '.[0].number // empty')"
+
+          # Built with printf into a file rather than a heredoc, so nothing in the captured
+          # output can be expanded or interpreted on its way into the issue.
+          {
+            printf 'The live demo failed its usability check.\n\n'
+            printf '| | |\n|---|---|\n'
+            printf '| checked | `%s` |\n' "$BASE"
+            printf '| at | %s |\n' "$NOW"
+            printf '| failing | **%s** |\n' "$SIG"
+            printf '| run | %s |\n\n' "$RUN_URL"
+            printf '```\n'
+            cat /tmp/uptime.log 2>/dev/null || printf 'The check produced no output — it was killed or it timed out.\n'
+            printf '```\n\n'
+            printf 'This is not necessarily a 500. The usual causes, in the order they are worth checking:\n\n'
+            printf '1. **database unreachable** — the CockroachDB cluster is asleep, out of\n'
+            printf '   connections, or its cert rotated. The page still returns 200 and every board\n'
+            printf '   renders empty.\n'
+            printf '2. **demo tenant wiped and not re-seeded** — `python -m axiom.seed --reset`. A judge\n'
+            printf '   opening a blank board reads it as "this does not work", not as "no data".\n'
+            printf '3. **duplicate effects nonzero** — stop and read the provider ledger. This is the one\n'
+            printf '   claim the entire project rests on.\n'
+            printf '4. **vector index not chosen** — recall silently degraded to a full scan. It returns\n'
+            printf '   correct rows on demo-sized data, so nothing else on earth would catch it.\n'
+            printf '   `python scripts/preflight.py` against production.\n\n'
+            printf 'Reproduce locally with `./scripts/uptime_check.sh %s`.\n\n' "$BASE"
+            printf 'This issue is managed by `.github/workflows/uptime.yml`. It is refreshed in place\n'
+            printf 'rather than duplicated, and it closes itself when a later run passes — so an open\n'
+            printf 'issue always means currently broken.\n\n'
+            printf '%s\n' "$MARKER"
+          } > /tmp/issue-body.md
+
+          if [ -n "$NUM" ]; then
+            # Already open: refresh it in place. Editing the body rather than commenting
+            # every 30 minutes is the whole point — a still-broken demo should read as one
+            # current incident, not as 48 notifications a day that get muted on day one.
+            PREV="$(gh issue view "$NUM" --json body --jq '.body' \
+                      | grep -m1 -o '<!-- axiom-uptime-signature: .* -->' || true)"
+            gh issue edit "$NUM" --body-file /tmp/issue-body.md >/dev/null
+
+            # One exception to the no-comment rule: comment when WHAT is failing changes.
+            # "database unreachable" becoming "duplicate effects nonzero" is a different
+            # emergency wearing the same issue, and it deserves a notification.
+            if [ "$PREV" != "$MARKER" ]; then
+              gh issue comment "$NUM" --body \
+                "The failure changed as of $NOW — now failing: **$SIG**. Details in the issue body. [Run]($RUN_URL)"
+            fi
+            echo "refreshed #$NUM (failing: $SIG)"
+          else
+            URL="$(gh issue create --title "$ISSUE_TITLE" --label "$ISSUE_LABEL" \
+                     --body-file /tmp/issue-body.md)"
+            # Best-effort, and deliberately after creation: assignment adds a notification,
+            # but a failed assignment must never be the reason the alert does not exist.
+            gh issue edit "$URL" --add-assignee "$GITHUB_REPOSITORY_OWNER" >/dev/null 2>&1 || true
+            echo "opened $URL (failing: $SIG)"
+          fi
+
+      - name: Close the alert issue once the demo is healthy again
+        if: steps.check.outputs.code == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Tolerant here, unlike the failure path: if this lookup fails, the worst outcome
+          # is a stale issue staying open one cycle longer, which errs toward noticing.
+          NUM="$(gh issue list --label "$ISSUE_LABEL" --state open --limit 1 \
+                   --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+          if [ -z "$NUM" ]; then
+            echo "demo healthy, no open alert"
+            exit 0
+          fi
+
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+          # Comment first, then close. The comment carries the passing output, so the issue
+          # reads as a closed incident with evidence attached rather than one that someone
+          # might have closed by hand while it was still broken. An open issue must mean
+          # broken right now and a closed one must mean verified fixed, or the signal is
+          # worth nothing by week three.
+          {
+            printf 'Recovered — the demo passed its usability check at %s.\n\n' "$(date -u '+%Y-%m-%d %H:%M UTC')"
+            printf '```\n'
+            cat /tmp/uptime.log
+            printf '```\n\n'
+            printf '[Run](%s) · closed automatically by `.github/workflows/uptime.yml`.\n' "$RUN_URL"
+          } > /tmp/recovery.md
+
+          gh issue comment "$NUM" --body-file /tmp/recovery.md
+          gh issue close "$NUM" --reason completed
+          echo "closed #$NUM"
+
+      - name: Fail the run so the Actions tab is red too
+        if: steps.check.outputs.code != '0'
+        # The issue is the durable signal; this is the immediate one. With GitHub's default
+        # Actions notification setting (Settings -> Notifications -> Actions, "failed
+        # workflows only"), a red scheduled run on the default branch emails the owner.
+        # Two independent channels for one failure is the right ratio when the cost of
+        # missing it is a judge concluding the project does not work.
+        run: exit 1

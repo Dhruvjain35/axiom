@@ -87,10 +87,11 @@ if (_ROOT / 'axiom' / '__init__.py').is_file() and str(_ROOT) not in sys.path:
     # test above is false, and nothing happens.
     sys.path.insert(0, str(_ROOT))
 
-# Bedrock has no models enabled in this account and enabling one is not free, so the
-# hosted demo runs on the deterministic local stand-ins. setdefault, not assignment: the
+# Bedrock's models are enabled in this account and both answer, but its on-demand quota
+# for Titan V2 is 0.0 requests/minute on a quota AWS marks non-adjustable, so the hosted
+# demo runs on the deterministic local stand-ins. setdefault, not assignment: the
 # function's own configuration stays the place this is declared, and AXIOM_OFFLINE=0
-# still works the day a model is turned on.
+# still works the day that quota is nonzero.
 os.environ.setdefault('AXIOM_OFFLINE', '1')
 
 # CockroachDB Cloud BASIC is signed by its own CA, which is in neither the Lambda image's

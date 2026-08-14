@@ -35,7 +35,7 @@ import psycopg
 from . import events
 from .config import EMBED_DIMS, settings
 from .db import vector_literal
-from .embeddings import content_sha256, embed_list
+from .embeddings import MODEL_ID as EMBEDDING_MODEL_ID, content_sha256, embed_list
 from .models import MemoryClass, Outcome, RetrievalClass, Trust
 
 _COLS = """id, memory_class, context_key, content, outcome, resolution, source,
@@ -111,18 +111,25 @@ def write(
     cur.execute("""
         INSERT INTO axiom_memory (
             tenant_id, memory_class, context_key, content, content_sha256,
-            embedding, outcome, resolution, source, source_ref, trust_level,
-            confidence, mission_id, task_id, attempt_id, created_by_agent_id,
-            policy_id, policy_version, supersedes)
+            embedding, embedding_model, outcome, resolution, source, source_ref,
+            trust_level, confidence, mission_id, task_id, attempt_id,
+            created_by_agent_id, policy_id, policy_version, supersedes)
+        -- embedding_model is written EXPLICITLY, never left to a column default. The
+        -- default used to be 'amazon.titan-embed-text-v2:0' and no caller ever set the
+        -- column, so every row claimed a Titan embedding while holding whatever the
+        -- process that wrote it actually produced. Two embedders means two vector
+        -- spaces, and a cosine query across a mixture returns confident wrong rows with
+        -- no error anywhere — so which space a row belongs to has to travel with it.
         VALUES (%(tenant)s, %(cls)s, %(ck)s, %(content)s, %(sha)s,
-                %(vec)s::VECTOR(1024), %(outcome)s, %(resolution)s, %(source)s,
+                %(vec)s::VECTOR(1024), %(emodel)s, %(outcome)s, %(resolution)s, %(source)s,
                 %(source_ref)s, %(trust)s, %(conf)s, %(mission)s, %(task)s,
                 %(attempt)s, %(agent)s, %(policy)s, %(pver)s, %(supersedes)s)
         RETURNING id
     """, {
         'tenant': str(tenant_id), 'cls': str(memory_class), 'ck': context_key,
         'content': content, 'sha': content_sha256(content),
-        'vec': vector_literal(embedding), 'outcome': str(outcome),
+        'vec': vector_literal(embedding), 'emodel': EMBEDDING_MODEL_ID,
+        'outcome': str(outcome),
         'resolution': json.dumps(resolution or {}), 'source': source,
         'source_ref': source_ref, 'trust': int(trust_level), 'conf': float(confidence),
         'mission': str(mission_id) if mission_id else None,

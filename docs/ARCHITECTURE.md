@@ -23,8 +23,8 @@ contradict it.
      │      │              │                  │      NO TXN HERE      │    │
      └──────┼──────────────┼──────────────────┼───────────┼───────────┼────┘
             │              │                  │           │           │
-            │  Bedrock: Titan V2 embeddings   │           │           │
-            │           Claude triage         │           │           │
+            │  Embeddings + triage            │           │           │
+            │  offline sketch, not Bedrock    │           │           │
             │  (axiom/embeddings.py, llm.py)  │           │           │
             │                                 │           │           │
             ▼              ▼                  ▼           │           ▼

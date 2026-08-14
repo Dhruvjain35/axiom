@@ -2898,20 +2898,23 @@ const RECEIPTS_RECORDED = {
   counterexample: { baseline_dollars_cents: 60000, axiom_dollars_cents: 30000,
                     baseline_refunds: 2, axiom_refunds: 1 },
   crash_windows: 7,
-  // Objects, with the same `status` strings the API serves, so inUse() reaches the same
-  // count either way. A build copy that said 4/4 where the live one says 3/4 would be a
-  // footer that gets more confident the moment its source goes down.
+  // Objects carrying the same `status` strings AND the same `in_use` booleans the API
+  // serves, so inUse() reaches the same count either way. A build copy that said 4/4
+  // where the live one says 3/4 would be a footer that gets more confident the moment
+  // its source goes down — and it is `in_use` that keeps the two honest, because the
+  // prose fallback below cannot tell "verified but quota-blocked" from "in use".
   cockroach_tools: [
-    { name: 'Distributed Vector Indexing', status: 'In use, verified on Cloud' },
-    { name: 'Cloud Managed MCP Server', status: 'In use, verified against the live server' },
-    { name: 'ccloud CLI', status: 'In use, verified' },
-    { name: 'Agent Skills Repo', status: 'Skill written and validated; PR not opened' },
+    { name: 'Distributed Vector Indexing', status: 'In use, verified on Cloud', in_use: true },
+    { name: 'Cloud Managed MCP Server', status: 'In use, verified against the live server', in_use: true },
+    { name: 'ccloud CLI', status: 'In use, verified', in_use: true },
+    { name: 'Agent Skills Repo', status: 'Skill written and validated; PR not opened', in_use: false },
   ],
   aws_services: [
-    { name: 'AWS Lambda', status: 'Deployed and working; public URL blocked at the account level' },
-    { name: 'Amazon Bedrock', status: 'Verified live in an earlier session, on a different AWS account' },
-    { name: 'CloudFront', status: 'Distribution exists, $0, does not solve the 403' },
-    { name: 'ECS Fargate / ALB / S3', status: 'Infrastructure written, never applied' },
+    { name: 'AWS Lambda', status: 'Deployed, public, and serving the demo', in_use: true },
+    { name: 'Amazon API Gateway (HTTP API)', status: 'In use — the public AWS front door', in_use: true },
+    { name: 'Amazon Bedrock', status: 'Reachable and verified; NOT USABLE on this account — quota is structurally zero', in_use: false },
+    { name: 'CloudFront', status: 'Distribution exists, $0, serves no traffic', in_use: false },
+    { name: 'ECS Fargate / ALB / S3', status: 'Infrastructure written, never applied', in_use: false },
   ],
 };
 
@@ -2932,10 +2935,10 @@ function pick(o, keys) {
  *  Reads the `in_use` boolean the API serves. It used to INFER the answer by grepping the
  *  status prose for phrases like "never applied", and inference on prose gets it wrong the
  *  moment somebody writes a sentence the grep did not anticipate — which is exactly what
- *  happened. AWS rendered "3/4 in use", counting Amazon Bedrock, whose own detail text on
- *  the same page reads "No model is enabled on the account the deployment runs in, so it
- *  runs AXIOM_OFFLINE=1", and CloudFront, whose status literally says "does not solve the
- *  403" and which serves no traffic. The honest count is 1/4 — Lambda.
+ *  happened. AWS rendered "3/4 in use", counting Amazon Bedrock — whose models ARE enabled
+ *  on this account and DO answer, but whose on-demand quota for Titan V2 is 0.0 requests
+ *  per minute and not adjustable, so nothing calls it in a loop — and CloudFront, which
+ *  serves no traffic. The honest count is 2 of 5: Lambda and API Gateway.
  *
  *  A judge who hovers the tooltip sees the detail contradict the headline, and on the one
  *  page whose entire argument is that this project does not overclaim. So the fact is now
