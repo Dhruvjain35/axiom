@@ -356,7 +356,11 @@ function renderProviderStats(p) {
       + ' at the crash instant, 0 duplicates';
   }
 
-  if (PF.running) paintProofEvidence();
+  // Painted on every provider read, not only during a guided run. These three counters
+  // are the whole argument in nine characters, and on a page nobody has clicked they are
+  // the difference between "some dashboard" and "this has recovered n times, absorbed n
+  // replays and never paid twice".
+  paintProofEvidence();
 }
 
 // ────────────────────────────────────────────────────────────────── task grid ──
@@ -555,7 +559,7 @@ function renderTasks(tasks) {
   }
   $('#grid-note').textContent = tasks.length + ' tasks';
   renderStateStrip(S.mission && S.mission.by_state);
-  if (PF.running) paintProofEvidence();
+  paintProofEvidence();
 }
 
 /** The fence, at a size that survives a 720p screen recording.
@@ -1287,7 +1291,7 @@ function closeDrawer(fromHash) {
 
 // ─────────────────────────────────────────────────────────────────────── views ──
 
-const VIEWS = ['ops', 'ledger', 'memory', 'approvals', 'spec', 'counter'];
+const VIEWS = ['ops', 'ledger', 'decides', 'memory', 'approvals', 'domains', 'spec', 'counter'];
 
 /** The tab lives in the hash so a reload keeps its place and a demo can deep-link
  *  straight to, say, #spec without four seconds of clicking on camera. `#task/<uuid>`
@@ -1318,8 +1322,27 @@ function setView(v, fromHash) {
  *  money shot) are never gated on it. */
 async function tickView() {
   const v = S.view;
-  if (v === 'ledger') renderLedger(await get('/api/provider/ledger?limit=100', []));
-  else if (v === 'memory') {
+  // The three panels below poll nothing. They are experiments a human presses once, and
+  // an experiment that re-runs itself every four seconds is not an experiment — it is a
+  // load generator against a real Stripe account. They render from whatever state their
+  // last run left behind.
+  if (v === 'decides') {
+    renderDecides();
+    // Run it once, unasked, the first time this tab is opened in a session.
+    //
+    // The other two experiments are never auto-run: one spends a real Stripe API call and
+    // one sends real messages through the relay. This one costs a single request against
+    // its own tenant and cleans up after itself, and it is the strongest thing in the
+    // product — a judge with three minutes should not have to guess that a button exists
+    // before the panel means anything. The button stays, as RUN IT AGAIN.
+    if (MD.status === 'idle' && !MD.busy) runDecides(true);
+    return;
+  }
+  if (v === 'domains') { renderDomains(); loadDomains(); return; }
+  if (v === 'ledger') {
+    renderStripe();
+    renderLedger(await get('/api/provider/ledger?limit=100', []));
+  } else if (v === 'memory') {
     const inc = $('#mem-inadmissible').checked;
     renderMemories(await get('/api/memories?limit=100&include_inadmissible=' + inc, []));
     // Land on this tab with a live ANN result already on screen. An empty recall panel
@@ -1486,8 +1509,8 @@ function wire() {
     if (e.target.matches('input, select, textarea')) return;
     if (e.key === 'Escape' && !$('#brief').hidden) { closeBrief(); return; }
     if (e.key === 'b' || e.key === 'B' || e.key === '?') { openBrief(); return; }
-    const map = { '1': 'ops', '2': 'ledger', '3': 'memory', '4': 'approvals',
-                  '5': 'spec', '6': 'counter' };
+    const map = { '1': 'ops', '2': 'ledger', '3': 'decides', '4': 'memory',
+                  '5': 'approvals', '6': 'domains', '7': 'spec', '8': 'counter' };
     if (map[e.key]) setView(map[e.key]);
     if (e.key === 'Escape') closeDrawer();
   });
@@ -1560,6 +1583,11 @@ function wire() {
 
   $('#btn-proof').addEventListener('click', runProof);
   $('#pf-stop').addEventListener('click', () => { PF.abort = true; });
+  $('#pf-more').addEventListener('click', runProofContinuation);
+
+  $('#btn-decides').addEventListener('click', () => runDecides(false));
+  $('#btn-stripe').addEventListener('click', runStripe);
+  $('#btn-broadcast').addEventListener('click', runBroadcast);
 
   $('#btn-brief').addEventListener('click', openBrief);
   $('#brief-x').addEventListener('click', closeBrief);
@@ -1659,13 +1687,27 @@ const PROOF_STEPS = [
   ['THE PROVIDER LEDGER',   'verdict'],
 ];
 
+/** The optional eighth beat, offered only after the seven have landed.
+ *
+ *  It is not part of the default run for one reason: the seven steps prove that a crash
+ *  cannot cause a second refund, which is the EXECUTION claim, and forty seconds is
+ *  already the whole of a stranger's patience. The memory claim is a different argument
+ *  and it deserves to be entered deliberately — so it is a button that appears at the
+ *  verdict rather than four more steps a viewer did not ask for. */
+const MEMORY_STEP = ['MEMORY DECIDES', 'decides'];
+
 const PF = {
   running: false,
   abort: false,
   i: -1,
   stranded: null,     // {id, key, idem, amount, epoch, available_at} captured at the crash
   failed: false,
+  extended: false,    // has the tour been carried on into the memory experiment?
 };
+
+/** The rail's contents. Grows by one only once the continuation is taken, so the
+ *  seven-step run never shows an eighth tick it is not going to fill in. */
+function pfSteps() { return PF.extended ? PROOF_STEPS.concat([MEMORY_STEP]) : PROOF_STEPS; }
 
 const pfSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1692,16 +1734,18 @@ async function pfUntil(probe, budgetMs, everyMs, onTick) {
 }
 
 function pfRail() {
-  $('#pf-rail').innerHTML = PROOF_STEPS.map((s, i) => {
+  const steps = pfSteps();
+  $('#pf-rail').innerHTML = steps.map((s, i) => {
     const cls = i < PF.i ? 'is-done' : (i === PF.i ? 'is-now' : '');
     return `<li class="pfs ${cls}"><b>${i + 1}</b><span>${esc(s[0])}</span></li>`;
   }).join('');
 }
 
 function pfStep(i) {
+  const steps = pfSteps();
   PF.i = i;
-  $('#pf-n').textContent = (i + 1) + '/' + PROOF_STEPS.length;
-  $('#pf-step').textContent = PROOF_STEPS[i][0];
+  $('#pf-n').textContent = (i + 1) + '/' + steps.length;
+  $('#pf-step').textContent = steps[i][0];
   pfRail();
 }
 
@@ -1945,10 +1989,20 @@ async function stepVerdict() {
   pfRail();
 }
 
+/** Put the strip into its running dress: rail visible, STOP live, CONTINUE withdrawn.
+ *  Called by both entry points, because the continuation is a run too. */
+function pfEnter() {
+  $('#proof').classList.remove('is-idle');
+  $('#pf-rail').hidden = false;
+  $('#pf-stop').hidden = false;
+  $('#pf-more').hidden = true;
+}
+
 async function runProof() {
   if (PF.running) return;
   PF.running = true; PF.abort = false; PF.failed = false; PF.stranded = null;
-  $('#proof').hidden = false;
+  PF.extended = false;
+  pfEnter();
   $('#btn-proof').disabled = true;
   $('#btn-proof').textContent = 'PROOF RUNNING';
   paintProofEvidence();
@@ -1962,6 +2016,10 @@ async function runProof() {
     await stepVerdict();
     PF.i = PROOF_STEPS.length;      // every tick filled in
     pfRail();
+    // The execution half is proved. Offer the other half rather than assuming it: the
+    // control appears here and nowhere else, so it reads as "there is more", not as a
+    // second button competing with the first one.
+    $('#pf-more').hidden = false;
   } catch (e) {
     if (e && e.message === '__stopped__') {
       pfSay('stopped. The board is left exactly as it was — nothing here was staged.');
@@ -1972,8 +2030,978 @@ async function runProof() {
     }
   } finally {
     PF.running = false;
+    $('#pf-stop').hidden = true;
     $('#btn-proof').disabled = false;
     $('#btn-proof').textContent = 'RUN THE PROOF';
+  }
+}
+
+/** The eighth step. Same rules as the other seven: it narrates what came back and
+ *  nothing else, and if the endpoint is not on this deployment it says so instead of
+ *  passing a recorded transcript off as a live one. */
+async function stepMemoryDecides() {
+  PF.extended = true;
+  pfStep(7);
+  setView('decides');
+  pfSay('the crash is proved. Now the other half: the same recovery, three times, changing '
+      + 'nothing but what is in memory.');
+  await pfWait(2200);
+
+  // Do NOT re-run if this session already has a live result on screen. The panel auto-runs
+  // on its first visit and the endpoint is rate limited on the public demo, so a tour that
+  // fired it again would spend the allowance to replace a live result with an identical
+  // one — and, having been refused, would show the recorded run in its place. Observed as
+  // a 429 in exactly that order.
+  const r = (MD.status === 'live' && MD.data) ? MD.data : await runDecides(true);
+  pfCheck();
+  if (!r) {
+    pfSay('the live memory experiment did not answer'
+        + (MD.error ? ' (' + MD.error + ')' : '')
+        + ' — the recorded run is on screen and labelled as recorded.', 'miss');
+    await pfWait(3600);
+    return;
+  }
+  const acts = (r.steps || []).map((s) => s.action);
+  if (acts.length >= 3 && acts[0] !== acts[1] && acts[1] !== acts[2]) {
+    pfSay(`${acts.join(' → ')}. The task did not change, the receipt did not change, the fence `
+        + `did not change. ${r.quarantined || 0} memories were quarantined inside the same `
+        + 'transaction that re-asked, and the answer moved back.');
+  } else {
+    pfSay(`the decision read ${acts.join(' → ') || '—'} — it did not flip in both directions, `
+        + 'so this run did not demonstrate its claim.', 'miss');
+  }
+  await pfWait(1200);
+}
+
+async function runProofContinuation() {
+  if (PF.running) return;
+  PF.running = true; PF.abort = false;
+  pfEnter();
+  try {
+    await stepMemoryDecides();
+    PF.i = pfSteps().length;
+    pfRail();
+  } catch (e) {
+    if (e && e.message === '__stopped__') pfSay('stopped.');
+    else pfSay('the memory experiment failed: ' + (e && e.message ? e.message : String(e)), 'miss');
+    pfRail();
+  } finally {
+    PF.running = false;
+    $('#pf-stop').hidden = true;
+  }
+}
+
+// ══════════════════════════════════════════════ THE EVIDENCE THAT WAS INVISIBLE ══
+//
+// Four surfaces, added because the strongest results in this repository lived in CLI
+// scripts and markdown, where a judge with three minutes never looks:
+//
+//   MEMORY DECIDES   the same recovery, run three times, changing only memory
+//   STRIPE           the same crash against a real provider, in the LEDGER tab
+//   BEYOND REFUNDS   the same guarantee where the risk axis is people, not dollars
+//   RECEIPTS         the standing measured record, in the footer, always on screen
+//
+// Three rules govern all of it, and they are the same three the guided proof follows:
+//
+//   1. NOTHING HERE POLLS. Each panel is an experiment a human presses. One of them
+//      spends a real Stripe API call and another sends real messages through the relay;
+//      a panel that re-ran itself every four seconds would be a load generator.
+//
+//   2. IT NEVER 500s AND IT NEVER FAKES. Every call goes through attempt(), which turns
+//      a failure into a value. When an endpoint is missing or errors, the panel shows the
+//      RECORDED run — from a real terminal session, with the command and the date — and
+//      says the word RECORDED where you cannot miss it. A recorded result rendered as a
+//      live one would be the single worst thing this project could ship.
+//
+//   3. EVERY NUMBER WAS MEASURED. The fallbacks below are transcripts, not illustrations.
+//      Each carries the command that produced it so anyone can disagree with it.
+
+/** fetch that returns a value for every outcome, including the network throwing.
+ *  Counted in the same meter as everything else so the header's REQ figure stays true. */
+async function attempt(path, opts) {
+  P.reqs++;
+  try {
+    const res = await fetch(path, Object.assign(
+      { headers: { accept: 'application/json' } }, opts || {}));
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* html, or empty */ }
+    if (!res.ok) {
+      apiFailures++;
+      const why = (data && (data.error || data.detail)) || (res.status + ' ' + res.statusText);
+      return { ok: false, status: res.status, data: null, error: String(why) };
+    }
+    return { ok: true, status: res.status, data: data, error: null };
+  } catch (e) {
+    apiFailures++;
+    return { ok: false, status: 0, data: null, error: (e && e.message) || 'network error' };
+  }
+}
+
+const postJSON = (path, body) => attempt(path, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', accept: 'application/json' },
+  body: JSON.stringify(body || {}),
+});
+
+const n0 = (v) => Number(v || 0).toLocaleString('en-US');
+
+/** The banner every recorded panel wears. Deliberately not subtle. */
+function recordedFlag(prov, cmd) {
+  return `<div class="rec"><span class="rec-tag">RECORDED RUN</span>` +
+    `<span class="rec-why">${esc(prov)}</span>` +
+    (cmd ? `<code class="rec-cmd">${esc(cmd)}</code>` : '') + `</div>`;
+}
+
+// ────────────────────────────────────────────────────────────── memory decides ──
+
+/** A REAL run of the experiment, captured from this repository on a live cluster.
+ *
+ *  Shown only when POST /api/proof/memory is unavailable, and labelled RECORDED on
+ *  screen when it is. Reproduce with the command in `command`; the transcript printed by
+ *  scripts/memory_decides.py is the same three decisions in the same order.
+ *
+ *  Note what the numbers do. In step 2 the two new DUPLICATE_EFFECT memories arrive at
+ *  0.271 and 0.224 — the top two hits, displacing the RESOLVED memory that was steering
+ *  step 1 — and the action changes. In step 3 they are gone from the candidate set
+ *  entirely, because `quarantined` feeds `retrieval_class`, which is a vector-index
+ *  PREFIX column: the rows physically left that partition of the index inside the
+ *  transaction that then asked. Not filtered afterwards. Gone at COMMIT.
+ */
+const MEMORY_RECORDED = {
+  measured: '2026-08-13 · CockroachDB v26.2.3 (local single node) · AXIOM_OFFLINE=1 · '
+    + 'freshly seeded corpus · printed PASS',
+  command: './.venv/bin/python scripts/memory_decides.py',
+  quarantined: 3,
+  verdict: 'PASS',
+  plan_uses_vector_index: true,
+  plan_lines: [
+    'table: axiom_memory@axiom_memory_ann_by_context',
+    '• vector search',
+    "prefix spans: [/'11111111-1111-1111-1111-111111111111'/'EPISODIC'"
+      + "/'state:ACTION_PREPARED'/'ACTIONABLE']",
+  ],
+  steps: [
+    {
+      n: 1, label: 'memory as seeded', action: 'RESEND',
+      rationale: 'live receipt axm_c9aed27daf5fad08ee36f7fe38df5c116f374d967800c555 exists; '
+        + 're-dispatching under the same key (5 comparable recoveries recalled, none adverse)',
+      recalled: [
+        { similarity: 0.2228, outcome: 'RESOLVED', content: 'agent died mid-refund on a duplicate_charge task; re-dispatched under the same idempotency key; provider replayed the original refund; no second effect' },
+        { similarity: 0.0599, outcome: 'DUPLICATE_EFFECT', content: 'worker crashed on a fraud_suspected refund and a second agent re-planned from the transcript instead of the receipt; the customer was refunded twice' },
+        { similarity: 0.0333, outcome: 'HUMAN_REQUIRED', content: 'recovery on a fraud_suspected chargeback could not determine provider state and required a human to reconcile by hand' },
+        { similarity: 0.0318, outcome: 'RESOLVED', content: 'agent died mid-refund on a not_delivered task; re-dispatch returned the original refund reference; ledger showed exactly one refund' },
+        { similarity: 0.0000, outcome: 'RESOLVED', content: 'agent died after dispatch on a late_delivery task; receipt was still PREPARED; re-send confirmed the effect had already landed' },
+      ],
+    },
+    {
+      n: 2, label: '+2 memories of a DUPLICATE EFFECT', action: 'ESCALATE',
+      rationale: '4/5 comparable recoveries ended in a duplicate effect or needed a human; '
+        + 'refusing to re-dispatch unattended',
+      recalled: [
+        { similarity: 0.2707, outcome: 'DUPLICATE_EFFECT', content: 'agent died mid-refund on a duplicate_charge task; a second refund reached the provider before the first was recorded; duplicate effect confirmed on the ledger' },
+        { similarity: 0.2235, outcome: 'DUPLICATE_EFFECT', content: 'agent died mid-refund on a duplicate_charge task; the recovering worker re-planned from the transcript instead of the receipt and the customer was refunded twice' },
+        { similarity: 0.2228, outcome: 'RESOLVED', content: 'agent died mid-refund on a duplicate_charge task; re-dispatched under the same idempotency key; provider replayed the original refund; no second effect' },
+        { similarity: 0.0599, outcome: 'DUPLICATE_EFFECT', content: 'worker crashed on a fraud_suspected refund and a second agent re-planned from the transcript instead of the receipt; the customer was refunded twice' },
+        { similarity: 0.0333, outcome: 'HUMAN_REQUIRED', content: 'recovery on a fraud_suspected chargeback could not determine provider state and required a human to reconcile by hand' },
+      ],
+    },
+    {
+      n: 3, label: 'those 3 quarantined, SAME transaction', action: 'RESEND',
+      rationale: 'live receipt axm_c9aed27daf5fad08ee36f7fe38df5c116f374d967800c555 exists; '
+        + 're-dispatching under the same key (4 comparable recoveries recalled, none adverse)',
+      recalled: [
+        { similarity: 0.2228, outcome: 'RESOLVED', content: 'agent died mid-refund on a duplicate_charge task; re-dispatched under the same idempotency key; provider replayed the original refund; no second effect' },
+        { similarity: 0.0333, outcome: 'HUMAN_REQUIRED', content: 'recovery on a fraud_suspected chargeback could not determine provider state and required a human to reconcile by hand' },
+        { similarity: 0.0318, outcome: 'RESOLVED', content: 'agent died mid-refund on a not_delivered task; re-dispatch returned the original refund reference; ledger showed exactly one refund' },
+        { similarity: 0.0000, outcome: 'RESOLVED', content: 'agent died after dispatch on a late_delivery task; receipt was still PREPARED; re-send confirmed the effect had already landed' },
+      ],
+    },
+  ],
+};
+
+/** What the three runs will be, stated before they are run. This is the PROCEDURE, which
+ *  is fixed by the experiment, not a prediction of the answers — the answer column reads
+ *  "—" until the server has actually returned one. */
+const MD_PROCEDURE = [
+  'memory exactly as seeded',
+  'two memories of a DUPLICATE EFFECT added',
+  'those memories quarantined, same transaction',
+];
+
+const MD = { status: 'idle', data: null, error: null, busy: false, reveal: 0 };
+
+/** Fallback only. The live endpoint marks each hit `adverse` itself, which is the
+ *  classification the RECOVERY actually used; re-deriving it in the browser from the
+ *  outcome string would be a second opinion presented as the system's own. */
+const MD_ADVERSE = new Set(['DUPLICATE_EFFECT', 'HUMAN_REQUIRED']);
+
+const hitKey = (h) => String(h.id || h.content || '');
+const isAdverse = (h) => (h.adverse !== undefined ? !!h.adverse
+  : MD_ADVERSE.has(String(h.outcome || '')));
+
+/** The recall plan, reduced to the lines that answer the only question anyone asks of it:
+ *  was the ANN index used, or was this a scan? The live endpoint returns the whole EXPLAIN
+ *  (including CockroachDB's index recommendations, which are about a different query
+ *  shape), so this is labelled an excerpt where it is printed. */
+function mdPlanLines(d) {
+  if (Array.isArray(d.plan_lines) && d.plan_lines.length) return d.plan_lines;
+  const raw = typeof d.plan === 'string' ? d.plan : '';
+  if (!raw) return [];
+  return raw.split('\n')
+    .filter((l) => /vector search|prefix spans|table:|top-k|lookup join/.test(l))
+    .map((l) => l.replace(/\s+$/, ''));
+}
+
+function mdHit(h, tag, gone) {
+  const sim = Number(h.similarity || 0);
+  const out = String(h.outcome || '');
+  const adverse = isAdverse(h);
+  return (
+    `<div class="hit${gone ? ' is-gone' : ''}${adverse ? ' is-adverse' : ''}">` +
+      `<div><div class="hit-sim">${gone ? '—' : sim.toFixed(3)}</div>` +
+        (gone ? '' : `<div class="simbar"><i style="width:${Math.max(0, Math.min(100, sim * 100)).toFixed(1)}%"></i></div>`) +
+      `</div>` +
+      `<div class="hit-body">` +
+        `<div class="hit-content">${esc(h.content)}</div>` +
+        `<div class="hit-meta"><span class="mo mo-${esc(out)}">${esc(out || '—')}</span>` +
+          (h.source ? `<span>${esc(h.source)}</span>` : '') +
+          (h.trust_level != null ? `<span>trust ${esc(h.trust_level)}</span>` : '') +
+          (h.id ? `<span>${esc(shortId(h.id))}</span>` : '') +
+        `</div>` +
+      `</div>` +
+      `<div>${tag ? `<span class="hit-tag${gone ? ' is-gone-tag' : ''}">${esc(tag)}</span>` : ''}</div>` +
+    `</div>`
+  );
+}
+
+/** One run of the recovery, with the recall it decided on.
+ *
+ *  `prev` is the step before it and `everSeen` is every memory any earlier step recalled.
+ *  Both are needed, and the difference between them is not pedantry. A memory that shows
+ *  up in step 3 having been absent from step 2 is usually NOT a new memory — it is one
+ *  that step 2's two adverse arrivals pushed out of the top k and the quarantine let back
+ *  in. Labelling that "NEW" would be a small lie in the middle of the one panel whose
+ *  whole subject is which memory moved the decision. */
+function mdStep(s, prev, i, isFresh, everSeen) {
+  const act = String(s.action || '—');
+  const hits = Array.isArray(s.recalled) ? s.recalled : [];
+  const before = prev && Array.isArray(prev.recalled) ? prev.recalled : null;
+  const seen = before ? new Set(before.map(hitKey)) : null;
+  const now = new Set(hits.map(hitKey));
+
+  // `planted_by_this_proof` is the server's own flag and is preferred wherever it exists:
+  // it knows which rows the experiment wrote, where the browser can only infer it from a
+  // recall list that also reorders under it.
+  const isNew = (h) => (h.planted_by_this_proof !== undefined
+    ? !!h.planted_by_this_proof : !everSeen.has(hitKey(h)));
+
+  const written = hits.filter(isNew);
+  const gone = before ? before.filter((h) => !now.has(hitKey(h))) : [];
+
+  // Nothing is tagged on the first run: with no earlier recall to compare against, every
+  // memory would read as new, which is exactly backwards — those five are the corpus this
+  // tenant already had.
+  const tagFor = (h) => {
+    if (!before) return '';
+    if (isNew(h)) return 'NEW MEMORY';
+    if (!seen.has(hitKey(h))) return 'BACK IN RANGE';
+    return '';
+  };
+
+  let delta = '';
+  if (before && (written.length || gone.length)) {
+    const bits = [];
+    if (written.length) {
+      bits.push(`${written.length} memor${written.length === 1 ? 'y was' : 'ies were'} written`);
+    }
+    if (gone.length) bits.push(`${gone.length} left the candidate set at COMMIT`);
+    const moved = prev.action !== s.action;
+    delta = `<p class="mdx-delta${moved ? ' is-moved' : ''}">${esc(bits.join(' · '))}` +
+      (moved ? ` — and the decision went <b>${esc(prev.action)} → ${esc(act)}</b>. Nothing else changed.`
+             : ' — and the decision did not move.') + `</p>`;
+  }
+
+  return (
+    `<article class="mdx${isFresh ? ' is-fresh' : ''}">` +
+      `<div class="mdx-head">` +
+        `<span class="mdx-n">${i + 1}</span>` +
+        `<span class="mdx-label">${esc(s.label || '')}</span>` +
+        `<span class="mdx-act a-${esc(act)}">${esc(act)}</span>` +
+      `</div>` +
+      `<p class="mdx-why">${esc(s.rationale || '')}</p>` +
+      delta +
+      `<div class="mdx-hits">` +
+        hits.map((h) => mdHit(h, tagFor(h), false)).join('') +
+        gone.map((h) => mdHit(h, 'QUARANTINED', true)).join('') +
+      `</div>` +
+    `</article>`
+  );
+}
+
+function renderDecides() {
+  const out = $('#md-out');
+  if (!out) return;
+  const d = MD.data;
+  const steps = (d && Array.isArray(d.steps)) ? d.steps : [];
+  const shown = MD.status === 'running' ? 0 : Math.min(MD.reveal, steps.length);
+  const done = MD.reveal > steps.length && steps.length > 0;
+
+  // The track. Three slots, always present, so the shape of the experiment is legible
+  // before it runs and the flip lands in the same three positions the eye is already on.
+  const slots = [0, 1, 2].map((i) => {
+    const s = i < shown ? steps[i] : null;
+    const act = s ? String(s.action || '—') : '—';
+    const because = (i < shown && s && s.label) ? s.label : MD_PROCEDURE[i];
+    // is-fresh only on the slot that just landed. The whole track is rebuilt on every
+    // reveal, so animating on the element rather than the render is what stops all three
+    // flashing again each time one of them fills in.
+    const fresh = s && i === shown - 1 ? ' is-fresh' : '';
+    return (
+      `<div class="mdt${s ? ' is-set' : ''}${fresh} a-${esc(act)}">` +
+        `<span class="mdt-n">${i + 1}</span>` +
+        `<span class="mdt-act a-${esc(act)}">${esc(act)}</span>` +
+        `<span class="mdt-because">${esc(because)}</span>` +
+      `</div>`
+    );
+  }).join('<i class="mdt-arrow">&rarr;</i>');
+
+  const acts = steps.slice(0, shown).map((s) => String(s.action));
+  const flipped = acts.length >= 3 && acts[0] !== acts[1] && acts[1] !== acts[2];
+
+  let head =
+    `<p class="md-lede">One refund, stopped at the crash instant. The recovery is run
+      <em>three times</em> against that same stopped task — same receipt, same fence, same
+      policy, same amount. The only thing that moves between the runs is what is in the
+      memory table. If the decision is the same all three times, the memory in this system
+      is decoration.</p>` +
+    `<div class="md-track">${slots}</div>`;
+
+  if (done) {
+    head += flipped
+      ? `<p class="md-flip">The decision moved, and moved back — in both directions, on
+           evidence alone.</p>`
+      : `<p class="md-flip is-miss">The decision did not flip in both directions on this run,
+           so this run did not demonstrate its claim. Reported as-is.</p>`;
+  }
+
+  const everSeen = new Set();
+  const body = steps.slice(0, shown).map((s, i) => {
+    const html = mdStep(s, i ? steps[i - 1] : null, i, i === shown - 1, everSeen);
+    for (const h of (s.recalled || [])) everSeen.add(hitKey(h));
+    return html;
+  }).join('');
+
+  let tail = '';
+  if (MD.status === 'running') {
+    tail = `<p class="md-wait">running three recoveries against one stopped task…</p>`;
+  } else if (done) {
+    const idx = !!d.plan_uses_vector_index;
+    const lines = mdPlanLines(d);
+    // The key is the other half of the claim and it is easy to miss: memory moved the
+    // decision three times and the idempotency key on that receipt never moved once. It is
+    // a GENERATED column — no code in this system, including the code that just changed
+    // its mind twice, is able to supply one.
+    const keyRow = d.idempotency_key
+      ? `<div class="md-key">` +
+          `<span class="lbl">IDEMPOTENCY KEY, ACROSS ALL THREE</span>` +
+          `<b>${esc(d.idempotency_key)}</b>` +
+          (d.key_unchanged !== false ? '<span class="md-same">UNCHANGED</span>' : '') +
+        `</div>`
+      : '';
+    tail = keyRow +
+      `<section class="md-plan">` +
+        `<div class="md-plan-top">` +
+          `<span class="idx ${idx ? 'is-ok' : 'is-bad'}"><i class="dot"></i>` +
+            `plan_uses_vector_index ${idx ? 'TRUE' : 'FALSE'}</span>` +
+          `<span class="md-plan-note">admissibility is a vector-index PREFIX column, so a
+            quarantined memory is not filtered out of the results — it is in a different
+            partition and never enters the candidate set</span>` +
+        `</div>` +
+        (lines.length ? `<pre class="json">${esc(lines.join('\n'))}</pre>` +
+          `<p class="md-plan-src">excerpt of the recall query plan, as EXPLAINed on this cluster</p>` : '') +
+      `</section>` +
+      `<p class="md-verdict ${d.verdict === 'PASS' ? 'is-proven' : 'is-unproven'}">` +
+        (d.verdict === 'PASS'
+          ? `PASS — memory changed the decision in both directions, and the quarantine took
+             effect inside the transaction that asked. ${n0(d.quarantined)} memories were
+             quarantined in that same transaction. The index was used, not scanned.`
+          : `${esc(String(d.verdict || 'NO VERDICT'))} — this run did not demonstrate the
+             claim` + (Array.isArray(d.expected) && d.expected.length
+               ? `: expected ${esc(d.expected.join(' → '))}, got
+                  ${esc(steps.map((s) => s.action).join(' → '))}` : '')
+             + `. Reported as it came back.`) +
+      `</p>`;
+  }
+
+  const flag = MD.status === 'recorded'
+    ? recordedFlag(MEMORY_RECORDED.measured
+        + (MD.error ? ' · live endpoint: ' + MD.error : ''), MEMORY_RECORDED.command)
+    : '';
+
+  out.innerHTML = `<div class="md">${flag}${head}${body}${tail}</div>`;
+  $('#md-sub').textContent = MD.status === 'live'
+    ? 'one request · three recoveries · three serializable transactions'
+      + (d && d.elapsed_ms != null ? ' · ' + n0(Math.round(d.elapsed_ms)) + ' ms' : '')
+    : 'same task · same receipt · same fence · same policy · same amount';
+  $('#md-foot-key').textContent = MEMORY_RECORDED.command;
+}
+
+/** Reveal the three runs one at a time.
+ *
+ *  The server answers once with all three; this is presentation, not computation, and the
+ *  header says so ("one request · three recoveries"). It exists because the whole point is
+ *  a value CHANGING, and three rows appearing simultaneously is a table, not a flip. */
+async function mdReveal(n) {
+  for (let i = 1; i <= n; i++) {
+    MD.reveal = i;
+    renderDecides();
+    if (i < n) await new Promise((r) => setTimeout(r, 780));
+  }
+  MD.reveal = n + 1;
+  renderDecides();
+}
+
+/** Returns the LIVE payload, or null if what is on screen is the recorded run.
+ *  The caller (the guided tour) uses that distinction to narrate honestly. */
+/** The endpoint is rate limited on the public demo ("retry in 4s"), so the control holds
+ *  itself shut for slightly longer than that. A judge who double-presses should get the
+ *  second run, not a refusal. */
+const MD_COOLDOWN_MS = 6000;
+
+async function runDecides(fromTour) {
+  if (MD.busy) return null;
+  MD.busy = true;
+  const b = $('#btn-decides');
+  b.disabled = true;
+  b.textContent = 'RUNNING…';
+  // Held aside before the reset: a re-run that gets refused must NOT replace a good live
+  // result with the recorded transcript. Losing evidence you already had, because you
+  // pressed the button twice, is worse than not re-running at all.
+  const prevLive = (MD.status === 'live' && MD.data) ? MD.data : null;
+  MD.status = 'running'; MD.reveal = 0; MD.data = null;
+  if (!fromTour) setView('decides');
+  renderDecides();
+
+  const r = await postJSON('/api/proof/memory', {});
+  const good = r.ok && r.data && Array.isArray(r.data.steps) && r.data.steps.length >= 3;
+  if (good) {
+    MD.status = 'live'; MD.data = r.data; MD.error = null;
+  } else if (prevLive) {
+    MD.status = 'live'; MD.data = prevLive; MD.error = r.error;
+    toast('the run was refused (' + (r.error || 'no reason given')
+        + ') — keeping the live result already on screen', true);
+  } else {
+    MD.status = 'recorded'; MD.data = MEMORY_RECORDED;
+    MD.error = r.error || 'the endpoint returned no steps';
+    toast('live memory experiment unavailable — showing the recorded run', true);
+  }
+
+  await mdReveal(MD.data.steps.length);
+  MD.busy = false;
+  b.textContent = MD.status === 'live' ? 'RUN IT AGAIN' : 'RUN THE EXPERIMENT';
+  setTimeout(() => { b.disabled = false; }, MD_COOLDOWN_MS);
+  return good ? MD.data : null;
+}
+
+// ─────────────────────────────────────────────────────────────────────── stripe ──
+
+/** A REAL Stripe test-mode run, from this repository. Real charge, real refund, real
+ *  crash at W4, and Stripe's own idempotent-replayed header on the re-send.
+ *
+ *  Test mode moves no real money and the ids below are test ids; the dashboard link only
+ *  resolves for someone logged into that account, which the panel says out loud rather
+ *  than offering a link that 404s for a stranger. */
+const STRIPE_RECORDED = {
+  measured: '2026-08-13 · Stripe test mode (sk_test_) · CockroachDB v26.2.3 (local) · '
+    + 'printed PASS',
+  command: 'AXIOM_STRIPE_KEY=sk_test_… ./.venv/bin/python scripts/stripe_proof.py',
+  order_ref: 'AXM-STRIPE-d71ae8',
+  charge_id: 'ch_3U47WUAwRnm0fQgO3vBr7Ueq',
+  refund_id: 're_3U47WUAwRnm0fQgO3ku7NhYE',
+  amount_cents: 30000,
+  replayed: true,
+  refunds_for_order: 1,
+  duplicates: 0,
+  dashboard_url: 'https://dashboard.stripe.com/test/payments/ch_3U47WUAwRnm0fQgO3vBr7Ueq',
+  verdict: 'PASS',
+  steps: [
+    { n: 1, label: 'a real charge exists', detail: 'ch_3U47WUAwRnm0fQgO3vBr7Ueq · $300.00 · Stripe test mode' },
+    { n: 2, label: 'policy stopped it, a human approved', detail: '$300.00 is over the unattended ceiling' },
+    { n: 3, label: 'receipt committed', detail: 'axm_f58e798f41f10fb19e36a3cfc2dc898a32… — GENERATED from immutable columns' },
+    { n: 4, label: 'refund sent, worker A KILLED', detail: 'crash window W4 — Stripe committed, AXIOM had not recorded it' },
+    { n: 5, label: 'worker B recovered', detail: 'fence e2 → e3 · RESEND, from the receipt' },
+    { n: 6, label: 're-sent under the SAME key', detail: 're_3U47WUAwRnm0fQgO3ku7NhYE — Stripe replied idempotent-replayed: true' },
+  ],
+};
+
+const SP = { status: 'idle', data: null, error: null, busy: false };
+
+function renderStripe() {
+  const box = $('#stripe-body');
+  if (!box) return;
+  const flag = $('#sp-flag');
+
+  // /api/proofs reports up front whether this deployment holds a Stripe key. Saying so
+  // before the button is pressed is better than sending a judge to a control that will
+  // answer "unavailable" — and it is the same fact either way.
+  const canRun = !(RX.data && RX.data.live
+    && RX.data.live.stripe_proof_available === false);
+  const b = $('#btn-stripe');
+  if (b && SP.status === 'idle') {
+    b.textContent = canRun ? 'RUN AGAINST STRIPE' : 'SHOW THE RECORDED RUN';
+  }
+
+  if (SP.status === 'idle') {
+    flag.hidden = true;
+    box.innerHTML =
+      (canRun ? '' :
+        `<p class="sp-note">This deployment holds no Stripe key, so it cannot create a real
+          charge. The control below shows the <b>recorded</b> run instead — a real test-mode
+          charge, a real refund, and Stripe's own reply — and labels it as recorded.</p>`) +
+      `<p class="sp-lede">The ledger below belongs to a payment provider this repository also
+        wrote. This runs the identical crash against <em>Stripe</em>, then asks Stripe what
+        happened. Stripe already refuses to double-charge a repeated idempotency key — but it
+        can only honour a key it is handed, and an agent that regenerates its key after a
+        crash gets a second refund from a provider that was willing to prevent one.
+        <em>The key surviving the crash</em> is the part AXIOM supplies.</p>`;
+    return;
+  }
+
+  if (SP.status === 'running') {
+    flag.hidden = true;
+    box.innerHTML = `<p class="md-wait">creating a charge, crashing at W4, recovering — this
+      is a live call to Stripe and takes a few seconds…</p>`;
+    return;
+  }
+
+  const d = SP.data || {};
+  const rec = SP.status === 'recorded';
+  flag.hidden = false;
+  flag.textContent = rec ? 'RECORDED' : 'LIVE · TEST MODE';
+  flag.className = 'sp-flag' + (rec ? ' is-rec' : ' is-live');
+
+  const steps = (Array.isArray(d.steps) ? d.steps : []).map((s) => (
+    `<li class="spx"><b>${esc(s.n)}</b><span class="spx-l">${esc(s.label)}</span>` +
+      `<span class="spx-d">${esc(s.detail || '')}</span></li>`
+  )).join('');
+
+  const dup = Number(d.duplicates || 0);
+  const facts =
+    `<div class="sp-facts">` +
+      `<div class="spf"><span>STRIPE SAYS</span>` +
+        `<b class="${d.replayed ? 'is-hot' : 'is-warn'}">idempotent-replayed: ${d.replayed ? 'true' : 'false'}</b></div>` +
+      `<div class="spf"><span>REFUND</span><b class="mono">${esc(d.refund_id || '—')}</b></div>` +
+      `<div class="spf"><span>CHARGE</span><b class="mono">${esc(d.charge_id || '—')}</b></div>` +
+      `<div class="spf"><span>REFUNDS FOR THIS ORDER</span><b>${n0(d.refunds_for_order)}</b></div>` +
+      `<div class="spf"><span>DUPLICATES</span><b class="${dup ? 'is-alarm' : ''}">${n0(dup)}</b></div>` +
+    `</div>`;
+
+  const verdict = d.verdict === 'PASS'
+    ? `<p class="sp-verdict is-proven">The money moved once. Stripe confirms the second
+        request was a replay, not a second refund — 0 duplicates <em>with</em> a replay,
+        which is the crash actually having happened.</p>`
+    : `<p class="sp-verdict is-unproven">${esc(String(d.verdict || 'no verdict'))} — reported
+        as-is.</p>`;
+
+  const link = d.dashboard_url
+    ? `<a class="sp-link" href="${esc(d.dashboard_url)}" target="_blank" rel="noopener noreferrer">
+         open in the Stripe dashboard &rarr;</a>
+       <span class="sp-link-note">resolves only for someone signed into that test account</span>`
+    : '';
+
+  box.innerHTML =
+    (rec ? recordedFlag(STRIPE_RECORDED.measured
+        + (SP.error ? ' · live endpoint: ' + SP.error : ''), STRIPE_RECORDED.command) : '') +
+    `<ol class="sp-steps">${steps}</ol>` + facts + verdict +
+    `<div class="sp-foot">${link}</div>`;
+}
+
+async function runStripe() {
+  if (SP.busy) return;
+  SP.busy = true;
+  const b = $('#btn-stripe');
+
+  // Read BEFORE the status is overwritten. This was computed after `SP.status` had already
+  // been set to 'running', so it was unconditionally null and the branch below that exists
+  // to protect an earlier live result could never fire: a second press inside the 45s rate
+  // limit threw away the live Stripe run the viewer had just watched and put the recorded
+  // transcript in its place. Pressing a button twice must never cost you evidence you
+  // already had — least of all the live evidence, in favour of the canned one.
+  const prevLive = (SP.status === 'live' && SP.data) ? SP.data : null;
+
+  b.disabled = true; b.textContent = 'CALLING STRIPE…';
+  SP.status = 'running';
+  renderStripe();
+
+  const r = await postJSON('/api/proof/stripe', {});
+  const d = r.ok ? r.data : null;
+  // available:false is a legitimate answer, not a failure: a deployment without a Stripe
+  // key cannot run this and must not pretend to. It lands in the same recorded branch as
+  // an outright error, with its own reason printed.
+  const live = !!(d && d.available !== false && d.refund_id);
+  if (live) { SP.status = 'live'; SP.data = d; SP.error = null; }
+  else if (prevLive) {
+    SP.status = 'live'; SP.data = prevLive; SP.error = (d && d.reason) || r.error;
+    toast('the run was refused (' + (SP.error || 'no reason given')
+        + ') — keeping the live result already on screen', true);
+  } else {
+    SP.status = 'recorded'; SP.data = STRIPE_RECORDED;
+    SP.error = (d && d.reason) || r.error || 'no Stripe key on this deployment';
+    toast('live Stripe run unavailable — showing the recorded run', true);
+  }
+  renderStripe();
+
+  // Bring the answer to the viewer. The band shares the ledger's scroller so it can grow
+  // to its full height, but growing pushed the payoff off the bottom of the pane: measured
+  // at 1280x800 the verdict sentence sat at y=763..803 against an 800px viewport, and at
+  // 1280x720 — the height this demo is recorded at — the STRIPE SAYS row went with it. The
+  // steps are the method and the facts row is the result, and a judge who presses the
+  // button and is shown only the method has been shown the least interesting half.
+  const facts = document.querySelector('#stripe-panel .sp-facts');
+  if (facts) facts.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+
+  SP.busy = false;
+  b.textContent = live ? 'RUN IT AGAIN' : (SP.status === 'live' ? 'RUN IT AGAIN' : 'SHOW IT AGAIN');
+  // A real charge and a real refund per press. Long enough that a double-click cannot
+  // spend two of them, and longer than the server's own rate limit.
+  setTimeout(() => { b.disabled = false; }, 9000);
+}
+
+// ────────────────────────────────────────────────────────────── beyond refunds ──
+
+/** GET /api/domains, recorded. Values come from axiom/risk.py, db/004_risk.sql and
+ *  scripts/demo_domain2.py — the ceilings a policy actually holds today. */
+const DOMAINS_RECORDED = [
+  { task_type: 'refund', name: 'e-commerce refunds', risk_unit: 'money.usd_cents',
+    noun: 'dollars', ceiling: 20000,
+    description: 'a refund over the unattended ceiling parks on a human, however routine' },
+  { task_type: 'broadcast', name: 'bulk outbound messaging', risk_unit: 'comms.recipients',
+    noun: 'recipients', ceiling: 2000,
+    description: 'a campaign that would reach more people than this stops for a human, '
+      + 'however little it costs to send' },
+];
+
+/** A REAL run of scripts/demo_domain2.py, the full 12-campaign version. The button on
+ *  this page runs a SMALL one (≤3 campaigns) because it sends real messages through the
+ *  relay; this is the complete measured result. */
+const BROADCAST_RECORDED = {
+  measured: '2026-08-13 · CockroachDB v26.2.3 (local) · AXIOM_OFFLINE=1 · 42.3s wall clock '
+    + '· printed PASS',
+  command: './.venv/bin/python scripts/demo_domain2.py --workers 3 --kill-every 1.8',
+  campaigns: 10, recipients: 21730, replays: 6, messaged_twice: 0, kills: 22, approvals: 5,
+  risk_unit: 'comms.recipients', verdict: 'PASS',
+};
+
+const DM = { domains: null, source: 'recorded', run: null, runSource: null, busy: false,
+             error: null, loaded: false };
+
+/** Prefer the server's rendering of its own ceiling: it knows whether the number came from
+ *  a live policy row or from the proof's default, and it formats the unit the policy is
+ *  actually written in. The derivation is the offline fallback only. */
+const ceilingText = (d) => (d.ceiling_rendered ? String(d.ceiling_rendered).toUpperCase()
+  : (String(d.risk_unit || '').indexOf('usd_cents') >= 0
+    ? money(d.ceiling) : n0(d.ceiling) + ' ' + String(d.noun || '').toUpperCase()));
+
+function renderDomains() {
+  const out = $('#dm-out');
+  if (!out) return;
+  // Refunds first, whatever order the registry came back in. This tab's argument is
+  // "here is the workload you have been watching, and here is one where the risk is not
+  // money at all" — it only reads that way in that order.
+  const rows = (DM.domains && DM.domains.length ? DM.domains : DOMAINS_RECORDED)
+    .slice().sort((a, b) => (a.task_type === 'refund' ? -1 : b.task_type === 'refund' ? 1 : 0));
+
+  const tbl = rows.map((d) => (
+    `<tr>` +
+      `<td class="dm-t">${esc(d.task_type)}</td>` +
+      `<td class="dm-n">${esc(d.name)}` +
+        (d.operation ? `<div class="dm-op">${esc(d.provider || '')}${d.provider ? ' · ' : ''}${esc(d.operation)}</div>` : '') +
+      `</td>` +
+      `<td class="dm-u"><code>${esc(d.risk_unit)}</code>` +
+        (d.reversibility ? `<div class="dm-op">${esc(d.reversibility)}</div>` : '') +
+      `</td>` +
+      `<td class="dm-c">${esc(ceilingText(d))}` +
+        (d.ceiling_source ? `<div class="dm-op">${esc(d.ceiling_source)}</div>` : '') +
+      `</td>` +
+      `<td class="dm-d">${esc(d.description || '')}</td>` +
+    `</tr>`
+  )).join('');
+
+  let run = '';
+  if (DM.busy) {
+    run = `<p class="md-wait">seeding campaigns, killing workers mid-send, recovering — a
+      few seconds…</p>`;
+  } else if (DM.run) {
+    const r = DM.run;
+    const twice = Number(r.messaged_twice || 0);
+    const rec = DM.runSource === 'recorded';
+    const replays = Number(r.replays || 0);
+    // The per-campaign rail, when the endpoint returns one. The middle row is the whole
+    // point: one campaign crashed at W4, was recovered, and the relay REPLAYED it.
+    const cSteps = (Array.isArray(r.steps) ? r.steps : []).map((s) => (
+      `<li class="spx${s.replayed ? ' is-replay' : ''}"><b>${esc(s.n)}</b>` +
+        `<span class="spx-l">${esc(s.campaign_ref || '')} · ${esc(s.label || '')}</span>` +
+        `<span class="spx-d">${esc(s.detail || '')}</span></li>`
+    )).join('');
+    run =
+      (rec ? recordedFlag(BROADCAST_RECORDED.measured
+          + (DM.error ? ' · live endpoint: ' + DM.error : ''), BROADCAST_RECORDED.command) : '') +
+      (cSteps ? `<ol class="sp-steps dm-steps">${cSteps}</ol>` : '') +
+      `<div class="dm-shot${twice ? ' is-alarm' : ''}">` +
+        `<div class="dm-shot-l">` +
+          `<span class="lbl">${esc(String(r.duplicate_label || 'recipients messaged twice').toUpperCase())}</span>` +
+          `<div class="bignum">${n0(twice)}</div>` +
+        `</div>` +
+        `<div class="money-sub">` +
+          `<span><b>${n0(r.campaigns)}</b> campaigns sent</span>` +
+          `<span><b>${n0(r.recipients)}</b> people messaged</span>` +
+          `<span><b>${n0(replays)}</b> idempotent replay${replays === 1 ? '' : 's'} the relay absorbed</span>` +
+          (r.kills != null ? `<span><b>${n0(r.kills)}</b> workers SIGKILLed mid-send</span>` : '') +
+          (r.approvals != null ? `<span><b>${n0(r.approvals)}</b> stopped for a human over the ceiling</span>` : '') +
+        `</div>` +
+        `<div class="money-verdict ${twice ? 'is-alarm' : (replays ? 'is-proven' : 'is-unproven')}">` +
+          (twice ? `${n0(twice)} people received a second copy — that is a failure and it is
+                    reported as one`
+            : (replays ? `PROVEN · the relay's own delivery log has one row per person, and
+                          ${n0(replays)} of the sends ${replays === 1 ? 'was a re-send' : 'were re-sends'}
+                          under a key recovered from the receipt`
+                       : 'no replay observed — 0 messaged twice is not yet a proof')) +
+        `</div>` +
+      `</div>`;
+  }
+
+  out.innerHTML =
+    `<div class="dm">` +
+      `<p class="md-lede">A refund's risk is dollars. A broadcast's risk is <em>people</em> —
+        and the same number expressed in dollars (about five cents of SES) clears any
+        money-shaped policy in the system without anyone being asked. So authority here is
+        denominated in the action's own unit, and a policy shown a unit it does not grant
+        <em>refuses</em>. Same engine, same five protocols, same crash windows, same
+        idempotency key — which is generated from (tenant, task, step, seq) and knows
+        nothing about either unit.</p>` +
+      `<table class="tbl dm-tbl"><thead><tr>` +
+        `<th>TASK TYPE</th><th>WORKLOAD</th><th>RISK UNIT</th>` +
+        `<th>UNATTENDED CEILING</th><th>WHAT THE CEILING MEANS</th>` +
+      `</tr></thead><tbody>${tbl}</tbody></table>` +
+      `<p class="dm-src">${DM.source === 'live' ? 'read from GET /api/domains'
+        : 'GET /api/domains did not answer — these are the ceilings in axiom/risk.py and db/004_risk.sql'}</p>` +
+      run +
+    `</div>`;
+}
+
+/** One GET, once per page load. The domain registry does not change while you look at it. */
+async function loadDomains() {
+  if (DM.loaded) return;
+  DM.loaded = true;
+  const r = await attempt('/api/domains');
+  if (r.ok && Array.isArray(r.data) && r.data.length) {
+    DM.domains = r.data; DM.source = 'live';
+  } else {
+    DM.domains = DOMAINS_RECORDED; DM.source = 'recorded';
+  }
+  renderDomains();
+}
+
+async function runBroadcast() {
+  if (DM.busy) return;
+  DM.busy = true;
+  const b = $('#btn-broadcast');
+  b.disabled = true; b.textContent = 'SENDING…';
+  setView('domains');
+  renderDomains();
+
+  const prevLive = (DM.runSource === 'live' && DM.run) ? DM.run : null;
+  const r = await postJSON('/api/proof/broadcast', {});
+  const live = !!(r.ok && r.data && r.data.campaigns != null);
+  if (live) { DM.run = r.data; DM.runSource = 'live'; DM.error = null; }
+  else if (prevLive) {
+    DM.run = prevLive; DM.runSource = 'live'; DM.error = r.error;
+    toast('the run was refused (' + (r.error || 'no reason given')
+        + ') — keeping the live result already on screen', true);
+  } else {
+    DM.run = BROADCAST_RECORDED; DM.runSource = 'recorded';
+    DM.error = r.error || 'the endpoint returned nothing usable';
+    toast('live broadcast unavailable — showing the recorded run', true);
+  }
+  DM.busy = false;
+  renderDomains();
+
+  // renderDomains() rewrites the pane, which resets its scroll to the top — and the
+  // registry table plus the lede is taller than the pane, so the result of the run a judge
+  // just pressed for landed ~180px BELOW the bottom edge with nothing on screen to say so.
+  // Measured at 1280x800: money shot at y=894 in a scroller whose visible band ends at 717.
+  // Same treatment the ledger's replayed row gets — do not reorder the panel to suit the
+  // argument, scroll to the thing that was asked for.
+  const shot = $('#dm-out .dm-shot');
+  if (shot) shot.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+
+  b.textContent = live ? 'RUN IT AGAIN' : 'RUN A BROADCAST';
+  // Real messages through the relay, so the same rule as Stripe: one press, one send.
+  setTimeout(() => { b.disabled = false; }, 9000);
+}
+
+// ───────────────────────────────────────────────────────────────────── receipts ──
+
+/** The footer's build-time copy. Every figure is a measured result with a command behind
+ *  it, and it is replaced the moment GET /api/proofs answers.
+ *
+ *  It is not a fallback in the apologetic sense — these are the same artifacts that
+ *  endpoint reads. It exists so the strip is populated on the first frame rather than
+ *  after a round trip, and so a deployment that has not shipped /api/proofs yet still
+ *  tells the truth instead of showing seven em-dashes. */
+const RECEIPTS_RECORDED = {
+  tests: 208,
+  preflight: { blocking_passed: 16, blocking_total: 16, advisory: 1 },
+  chaos: { kills: 30, replays: 6, duplicates: 0, refunds: 18,
+           cluster: 'CockroachDB Cloud v26.2.5' },
+  scale: { work_multiple: 3334.3, latency_multiple: 1.33, claim_index_rows: 30,
+           total_tasks: 100030 },
+  counterexample: { baseline_dollars_cents: 60000, axiom_dollars_cents: 30000,
+                    baseline_refunds: 2, axiom_refunds: 1 },
+  crash_windows: 7,
+  // Objects, with the same `status` strings the API serves, so inUse() reaches the same
+  // count either way. A build copy that said 4/4 where the live one says 3/4 would be a
+  // footer that gets more confident the moment its source goes down.
+  cockroach_tools: [
+    { name: 'Distributed Vector Indexing', status: 'In use, verified on Cloud' },
+    { name: 'Cloud Managed MCP Server', status: 'In use, verified against the live server' },
+    { name: 'ccloud CLI', status: 'In use, verified' },
+    { name: 'Agent Skills Repo', status: 'Skill written and validated; PR not opened' },
+  ],
+  aws_services: [
+    { name: 'AWS Lambda', status: 'Deployed and working; public URL blocked at the account level' },
+    { name: 'Amazon Bedrock', status: 'Verified live in an earlier session, on a different AWS account' },
+    { name: 'CloudFront', status: 'Distribution exists, $0, does not solve the 403' },
+    { name: 'ECS Fargate / ALB / S3', status: 'Infrastructure written, never applied' },
+  ],
+};
+
+const RX = { data: RECEIPTS_RECORDED, source: 'build' };
+
+/** First key that is actually present. The contract fixes the top-level shape but not the
+ *  inside of chaos/scale/counterexample, so each figure is looked up under the names it
+ *  could plausibly carry — and an item whose numbers are not there is simply not printed.
+ *  A missing receipt is better than a guessed one. */
+function pick(o, keys) {
+  if (!o) return null;
+  for (const k of keys) if (o[k] !== null && o[k] !== undefined) return o[k];
+  return null;
+}
+
+/** Is this tool actually in the running system?
+ *
+ *  Reads the `in_use` boolean the API serves. It used to INFER the answer by grepping the
+ *  status prose for phrases like "never applied", and inference on prose gets it wrong the
+ *  moment somebody writes a sentence the grep did not anticipate — which is exactly what
+ *  happened. AWS rendered "3/4 in use", counting Amazon Bedrock, whose own detail text on
+ *  the same page reads "No model is enabled on the account the deployment runs in, so it
+ *  runs AXIOM_OFFLINE=1", and CloudFront, whose status literally says "does not solve the
+ *  403" and which serves no traffic. The honest count is 1/4 — Lambda.
+ *
+ *  A judge who hovers the tooltip sees the detail contradict the headline, and on the one
+ *  page whose entire argument is that this project does not overclaim. So the fact is now
+ *  stated in axiom/measurements.json beside the measurement that produced it, and this
+ *  function reads it. The prose fallback survives only for older payloads. */
+function inUse(entry) {
+  if (entry && typeof entry.in_use === 'boolean') return entry.in_use;
+  const s = String((entry && entry.status) || '').toLowerCase();
+  return !(s.includes('never applied') || s.includes('not opened') || s.includes('no pr'));
+}
+
+function toolList(arr) {
+  return arr.map((t) => (typeof t === 'string' ? t
+    : `${t.name}${t.status ? ' — ' + t.status : ''}`)).join('\n');
+}
+
+function renderReceipts() {
+  const d = RX.data || {};
+  const items = [];
+  const add = (k, v, title) => items.push(
+    `<span class="rc-i"${title ? ` title="${esc(title)}"` : ''}>` +
+      `<span class="rc-k">${esc(k)}</span><span class="rc-v">${v}</span></span>`);
+
+  const src = d.sources || {};
+  const cmd = (k) => (src[k] && src[k].command ? ' · ' + src[k].command : '');
+
+  if (d.tests != null) {
+    add('TESTS', n0(d.tests) + ' passing',
+      'pytest -q against a live cluster' + cmd('tests'));
+  }
+
+  // /api/proofs does not carry the preflight result, so this one figure comes from the
+  // build copy and its provenance says so rather than pretending otherwise.
+  const pf = d.preflight || RECEIPTS_RECORDED.preflight;
+  const gp = pick(pf, ['blocking_passed', 'passed', 'blocking']);
+  const gt = pick(pf, ['blocking_total', 'total']);
+  if (gp != null && gt != null) {
+    add('PREFLIGHT', `${n0(gp)}/${n0(gt)} gates`,
+      'scripts/preflight.py — gates that read the cluster instead of trusting it, '
+      + n0(gt) + ' blocking and 1 advisory'
+      + (d.preflight ? '' : '. Compiled into this page: /api/proofs does not carry it.'));
+  }
+
+  const ch = d.chaos || {};
+  const kills = pick(ch, ['workers_sigkilled', 'kills', 'sigkills', 'workers_killed']);
+  const rep = pick(ch, ['idempotent_replays', 'replays']);
+  const dup = pick(ch, ['duplicate_refunds', 'duplicates', 'duplicate_orders']);
+  if (kills != null && rep != null && dup != null) {
+    add('CHAOS', `${n0(kills)} kills · ${n0(rep)} replays · <b class="${Number(dup) ? 'is-alarm' : ''}">${n0(dup)}</b> duplicate refunds`,
+      [ch.command, ch.where, ch.also].filter(Boolean).join('\n'));
+  }
+
+  const sc = d.scale || {};
+  const wm = pick(sc, ['work_growth_x', 'work_multiple', 'factor']);
+  const lm = pick(sc, ['claim_latency_growth_x', 'latency_multiple', 'latency_factor']);
+  const rows = pick(sc, ['claim_index_rows_end', 'claim_index_rows', 'index_rows']);
+  if (wm != null && lm != null) {
+    add('SCALE', `${n0(Math.round(Number(wm)))}× work at ${Number(lm).toFixed(2)}× latency`,
+      [(rows != null ? 'the claim index held ' + n0(rows) + ' rows throughout' : ''),
+       sc.claim, sc.command, sc.where].filter(Boolean).join('\n'));
+  }
+
+  const ce = d.counterexample || {};
+  const bd = pick(ce, ['baseline_dollars_cents']);
+  const ad = pick(ce, ['axiom_dollars_cents']);
+  if (bd != null && ad != null) {
+    add('BASELINE', `${esc(moneyShort(bd))} vs ${esc(moneyShort(ad))}`,
+      [ce.claim, ce.command, ce.where].filter(Boolean).join('\n'));
+  }
+
+  if (d.crash_windows != null) {
+    add('WINDOWS', 'W1–W' + n0(d.crash_windows),
+      'docs/CRASH_WINDOWS.md — every instant this system can die, and the defined outcome '
+      + 'of dying there');
+  }
+
+  const ct = Array.isArray(d.cockroach_tools) ? d.cockroach_tools : null;
+  if (ct && ct.length) {
+    add('COCKROACHDB', `${n0(ct.filter(inUse).length)}/${n0(ct.length)} in use`,
+      toolList(ct));
+  }
+  const aw = Array.isArray(d.aws_services) ? d.aws_services : null;
+  if (aw && aw.length) {
+    add('AWS', `${n0(aw.filter(inUse).length)}/${n0(aw.length)} in use`, toolList(aw));
+  }
+
+  $('#rc-items').innerHTML = items.join('');
+  const lbl = $('#rc-lbl');
+  lbl.textContent = RX.source === 'live' ? 'RECEIPTS' : 'RECEIPTS · BUILD COPY';
+  lbl.title = RX.source === 'live'
+    ? 'read from GET /api/proofs — recorded measurements, each reproducible from the '
+      + 'command in its tooltip'
+    : 'GET /api/proofs did not answer, so these are the figures compiled into this page from '
+      + 'the same committed artifacts. Every one was measured.';
+}
+
+async function loadReceipts() {
+  const r = await attempt('/api/proofs');
+  if (r.ok && r.data && typeof r.data === 'object' && r.data.tests != null) {
+    RX.data = r.data; RX.source = 'live';
+    renderReceipts();
+    // This response also carries `live.stripe_proof_available`, which decides what the
+    // Stripe control is allowed to promise. Repaint it now rather than leaving the wrong
+    // label up until the next four-second aux cycle.
+    if (S.view === 'ledger' && SP.status === 'idle') renderStripe();
   }
 }
 
@@ -2034,6 +3062,9 @@ function boot() {
   document.addEventListener('keydown', nudge, true);
 
   paintPoll();
+  paintProofEvidence();
+  renderReceipts();          // the build-time copy, immediately — then the live one
+  loadReceipts();
   tickView();
   maybeOpenBriefOnBoot();
   run();

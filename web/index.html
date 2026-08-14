@@ -93,21 +93,32 @@
   </section>
 
   <!-- ─────────────────────────────────────────────────────────── proof run ── -->
-  <!-- The guided demo. Hidden until RUN THE PROOF is pressed; it narrates each step
-       against what the rest of the page is doing, and it never claims a beat it has not
-       actually observed in the API responses. -->
-  <section class="proof" id="proof" hidden>
-    <ol class="pf-rail" id="pf-rail"></ol>
+  <!-- The guided demo. It narrates each step against what the rest of the page is doing,
+       and it never claims a beat it has not actually observed in the API responses.
+
+       It is no longer hidden until RUN THE PROOF is pressed, and that is deliberate. A
+       judge who clicks nothing used to leave with no idea what the button would do; the
+       idle state spends one line stating the procedure and, next to it, the three counters
+       READ OUT OF THE DATABASE — so an untouched page already says "this thing has
+       recovered n times, absorbed n replays and created 0 duplicates". The rail appears
+       only once a run starts, so the idle cost is one line rather than three. -->
+  <section class="proof is-idle" id="proof">
+    <ol class="pf-rail" id="pf-rail" hidden></ol>
     <div class="pf-line">
-      <span class="pf-n" id="pf-n">1/7</span>
-      <span class="pf-step" id="pf-step">—</span>
-      <span class="pf-say" id="pf-say">—</span>
+      <span class="pf-n" id="pf-n">7 STEPS</span>
+      <span class="pf-step" id="pf-step">THE PROOF</span>
+      <span class="pf-say" id="pf-say">seed the exceptions · crash a worker at W4 · wait out
+        the lease · recover under the same idempotency key · read the provider's own ledger.
+        About 40 seconds, entirely live.</span>
       <span class="pf-ev">
         <span class="pev" title="task.recovered events: a worker claimed a task and found a live receipt already on it"><b id="pf-fence">0</b><span>RECOVERIES</span></span>
         <span class="pev"><b id="pf-replay">0</b><span>REPLAYS</span></span>
         <span class="pev" id="pf-dupe-box"><b id="pf-dupe">0</b><span>DUPLICATES</span></span>
       </span>
-      <button class="btn btn-xs" id="pf-stop">STOP</button>
+      <!-- One slot, two controls. STOP while a run is live, CONTINUE once it has landed —
+           the tour's optional eighth step, which is the memory experiment. -->
+      <button class="btn btn-xs" id="pf-stop" hidden>STOP</button>
+      <button class="btn btn-xs btn-more" id="pf-more" hidden>CONTINUE · MEMORY DECIDES</button>
     </div>
   </section>
 
@@ -156,13 +167,21 @@
 
     <!-- ── main column ── -->
     <section class="center">
+      <!-- Two tabs added, and their positions are an argument.
+           MEMORY DECIDES sits before MEMORY because the experiment is the claim and the
+           store is the evidence behind it, and BEYOND REFUNDS sits after APPROVALS
+           because it is the same authority beat in a unit that is not money. The Stripe
+           proof did NOT get a tab: it belongs at the top of LEDGER, which is already the
+           tab whose whole subject is a provider's own books. -->
       <nav class="tabs" id="tabs">
         <button class="tab is-on" data-view="ops"><span class="tab-n">1</span>OPERATIONS</button>
         <button class="tab" data-view="ledger"><span class="tab-n">2</span>LEDGER</button>
-        <button class="tab" data-view="memory"><span class="tab-n">3</span>MEMORY</button>
-        <button class="tab" data-view="approvals"><span class="tab-n">4</span>APPROVALS<i class="badge" id="appr-badge" hidden>0</i></button>
-        <button class="tab" data-view="spec"><span class="tab-n">5</span>CRASH WINDOWS</button>
-        <button class="tab" data-view="counter"><span class="tab-n">6</span>COUNTEREXAMPLE</button>
+        <button class="tab" data-view="decides"><span class="tab-n">3</span>MEMORY DECIDES</button>
+        <button class="tab" data-view="memory"><span class="tab-n">4</span>MEMORY</button>
+        <button class="tab" data-view="approvals"><span class="tab-n">5</span>APPROVALS<i class="badge" id="appr-badge" hidden>0</i></button>
+        <button class="tab" data-view="domains"><span class="tab-n">6</span>BEYOND REFUNDS</button>
+        <button class="tab" data-view="spec"><span class="tab-n">7</span>CRASH WINDOWS</button>
+        <button class="tab" data-view="counter"><span class="tab-n">8</span>COUNTEREXAMPLE</button>
       </nav>
 
       <div class="views">
@@ -233,10 +252,57 @@
             <h3 class="view-title">EXTERNAL PROVIDER LEDGER</h3>
             <span class="view-sub">separate database · no shared transaction · the only source of truth about the real world</span>
           </div>
-          <div class="scroller"><table class="tbl" id="ledger-tbl"></table></div>
+
+          <!-- The Stripe proof sits above the simulated ledger rather than in a tab of its
+               own, because it is the same claim in a stronger book. Everything below this
+               band is a payment provider this repository also wrote, which is a fair way to
+               build the thing and an unconvincing way to finish arguing about it. This band
+               is Stripe, in test mode, answering the same question about the same crash.
+
+               It lives INSIDE the scroller, sharing it with the table. Capping it at a
+               fraction of the pane instead clipped its own verdict sentence in half, which
+               is the one line of it that matters; sharing the scroll means a completed run
+               pushes the table down rather than cutting itself off, and the table's sticky
+               header still sticks — to this scroller. -->
+          <div class="scroller">
+            <section class="sp" id="stripe-panel">
+              <div class="sp-head">
+                <div class="sp-id">
+                  <h4>REAL PROVIDER · STRIPE</h4>
+                  <span class="sp-sub">test mode · moves no real money · the same crash, at the same instant</span>
+                </div>
+                <span class="sp-flag" id="sp-flag" hidden>—</span>
+                <button class="btn btn-go" id="btn-stripe">RUN AGAINST STRIPE</button>
+              </div>
+              <div class="sp-body" id="stripe-body"></div>
+            </section>
+            <table class="tbl" id="ledger-tbl"></table>
+          </div>
           <div class="view-foot">
             <span><b>REPLAYS &gt; 0</b> means the provider was asked twice under one key and
               acted once. That row is the crash actually happening, not a claim that it cannot.</span>
+          </div>
+        </div>
+
+        <!-- ══ MEMORY DECIDES ══ -->
+        <!-- The one experiment that separates memory that DECIDES from memory that is
+             merely retrieved and printed. The same crashed refund, held at W4, recovered
+             three times; nothing changes between the runs except what is in the memory
+             table. If the action does not move, memory here is decoration. It moves. -->
+        <div class="view" data-view="decides">
+          <div class="view-head">
+            <div class="head-l">
+              <h3 class="view-title">MEMORY DECIDES</h3>
+              <span class="view-sub" id="md-sub">same task · same receipt · same fence · same policy · same amount</span>
+            </div>
+            <button class="btn btn-go" id="btn-decides">RUN THE EXPERIMENT</button>
+          </div>
+          <div class="scroller" id="md-out"></div>
+          <div class="view-foot">
+            <span>Memory is allowed to override the default in <b>one direction only</b> —
+              toward escalation. Recalled evidence can stop an act; it can never talk the
+              system into one.</span>
+            <span class="foot-key" id="md-foot-key"></span>
           </div>
         </div>
 
@@ -317,6 +383,27 @@
           <div class="approvals" id="approvals"></div>
         </div>
 
+        <!-- ══ BEYOND REFUNDS ══ -->
+        <!-- The question every judge asks second: is this one demo or a platform? The
+             answer is not a claim about generality, it is a second workload whose risk
+             axis is not money at all — and the same crash, in it, with the same
+             guarantee. -->
+        <div class="view" data-view="domains">
+          <div class="view-head">
+            <div class="head-l">
+              <h3 class="view-title">BEYOND REFUNDS</h3>
+              <span class="view-sub">authority is denominated in the action's own units</span>
+            </div>
+            <button class="btn btn-go" id="btn-broadcast">RUN A BROADCAST</button>
+          </div>
+          <div class="scroller" id="dm-out"></div>
+          <div class="view-foot">
+            <span>A measurement in a unit the policy does not grant is a <b>REFUSAL</b>, not a
+              warning: a refund policy shown <b>comms.recipients</b> has no opinion about email,
+              and no opinion must never read as yes.</span>
+          </div>
+        </div>
+
         <!-- ══ SPEC ══ -->
         <div class="view" data-view="spec">
           <div class="spec-head">
@@ -368,6 +455,17 @@
     </aside>
 
   </main>
+
+  <!-- ────────────────────────────────────────────────────────────── receipts ── -->
+  <!-- The standing record, on screen at all times, read from GET /api/proofs.
+       Every figure here was MEASURED and is reproducible from a command in the repo;
+       none of it is a badge and none of it is rounded up. It is a footer rather than a
+       tab because its job is to be true in the background — a judge who never clicks
+       anything should still leave knowing how much of this was run rather than argued. -->
+  <footer class="receipts" id="receipts">
+    <span class="rc-lbl" id="rc-lbl">RECEIPTS</span>
+    <div class="rc-items" id="rc-items"></div>
+  </footer>
 
   <!-- ─────────────────────────────────────────────────────────────── drawer ── -->
   <div class="drawer" id="drawer" hidden>
@@ -454,6 +552,29 @@
         <p class="bnote">The guarantee is <em>effectively-once via idempotency receipts</em>.
           It is never exactly-once execution — that is not obtainable against a remote
           provider, and anything claiming it is lying to you.</p>
+      </section>
+
+      <!-- Added last, and it is the section a judge with ninety seconds should read
+           second. The four surfaces below are the evidence that used to exist only in
+           CLI scripts; naming them here is the difference between a judge finding the
+           memory experiment and never knowing it was there. -->
+      <section class="bsec">
+        <h3>AND THEN, IF YOU HAVE THREE MINUTES</h3>
+        <table class="btbl">
+          <tr><td class="bt-n">MEMORY DECIDES</td><td class="bt-a a-con">TAB 3</td>
+            <td>the same crashed refund recovered three times, changing nothing but memory:
+              <b>RESEND → ESCALATE → RESEND</b>. If it did not move, the memory here would be
+              decoration.</td></tr>
+          <tr><td class="bt-n">STRIPE</td><td class="bt-a a-adv">IN LEDGER</td>
+            <td>the identical crash against a real provider, with Stripe's own
+              <b>idempotent-replayed: true</b> on the re-send</td></tr>
+          <tr><td class="bt-n">BEYOND REFUNDS</td><td class="bt-a a-auth">TAB 6</td>
+            <td>a second workload where the authority ceiling is <b>2,000 recipients</b>,
+              not dollars — the same guarantee, a different unit</td></tr>
+          <tr><td class="bt-n">RECEIPTS</td><td class="bt-a a-adv">FOOTER</td>
+            <td>the measured record, on screen at all times: tests, chaos, scale, baseline.
+              Every figure has a command behind it.</td></tr>
+        </table>
       </section>
 
     </div>

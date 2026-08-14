@@ -100,9 +100,9 @@ table { border-collapse: collapse; width: 100%; }
   display: grid;
   /* The mission row sizes to its content: with every task state occupied the count strip
    * runs to three lines, and a fixed height clipped it. The third row is the guided-proof
-   * strip, which is `hidden` and therefore zero-height until a run starts. The body row
-   * takes what is left. */
-  grid-template-rows: var(--h-top) auto auto minmax(0, 1fr);
+   * strip — one line idle, three once a run brings the step rail in. The last row is the
+   * receipts footer. The body row takes what is left. */
+  grid-template-rows: var(--h-top) auto auto minmax(0, 1fr) auto;
 }
 
 /* ──────────────────────────────────────────────────────────────────── topbar ── */
@@ -1266,3 +1266,434 @@ pre.json {
 /* A footnote under the AXIOM value, for the two rows where the number needs an
  * explanation and leaving it unexplained would read as a discrepancy. */
 .ce-note { font-size: 9.5px; line-height: 1.45; color: var(--ghost); margin-top: 3px; max-width: 46ch; }
+
+/* ══════════════════════════════════ the evidence that was only in the terminal ══
+ *
+ * Everything below was added for one reason: the strongest results in this repository
+ * lived in CLI scripts, where a judge with three minutes never looks. Same rules as the
+ * rest of this file — hairlines, one alarm colour, structure from alignment, system
+ * fonts, no gradients and no glow. Nothing above this line is restyled; every selector
+ * here is either a new element or a variant class on one.
+ */
+
+/* ─────────────────────────────────────────────────────── the proof strip, idle ── */
+
+/* The strip is on screen from the first frame now, so an untouched page still states the
+ * procedure and prints the three counters out of the database. Idle it is one line; a run
+ * brings the rail in above it. */
+.proof.is-idle { background: var(--panel); }
+.proof.is-idle .pf-n {
+  font-size: 9px; letter-spacing: 0.16em; color: var(--ghost);
+  border: 1px solid var(--rule-2); padding: 1px 5px;
+}
+.proof.is-idle .pf-step { color: var(--dim); }
+.proof.is-idle .pf-say  { color: var(--faint); }
+.proof.is-idle .pev b   { color: var(--dim); }
+
+/* The tour's optional eighth step. Offered only at the verdict, so it is allowed to carry
+ * body colour without competing with RUN THE PROOF — by then that button is spent. */
+.btn-more { color: var(--text); border-color: var(--rule-3); letter-spacing: 0.1em; }
+.btn-more:hover { border-color: var(--focus); background: #1b211e; }
+
+/* ──────────────────────────────────────────────────────────── the receipts strip ── */
+
+/* A spec sheet, not a row of badges: label in the micro-label style, value in data mono,
+ * hairline separators, and every item carries its provenance in its title. It wraps
+ * rather than scrolls — a receipt that has scrolled out of view is a receipt nobody
+ * reads, and one extra 17px line is a cheap price for that. */
+.receipts {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 5px 14px 6px;
+  border-top: 1px solid var(--rule-2);
+  background: var(--panel);
+}
+.rc-lbl {
+  font-size: 9px; letter-spacing: 0.2em; color: var(--faint);
+  white-space: nowrap; flex: 0 0 auto;
+}
+.rc-items { display: flex; flex-wrap: wrap; gap: 2px 0; min-width: 0; }
+.rc-i {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  padding: 0 11px; border-left: 1px solid var(--rule-2);
+  font-size: 9.5px; white-space: nowrap;
+}
+.rc-i:first-child { border-left: 0; padding-left: 0; }
+.rc-k { font-size: 8.5px; letter-spacing: 0.14em; color: var(--ghost); }
+.rc-v { color: var(--dim); }
+.rc-v b { font-weight: 400; color: var(--text); }
+.rc-v b.is-alarm { color: var(--alarm); }
+
+/* ──────────────────────────────────────────────────────── the recorded-run flag ── */
+
+/* Worn by any panel showing a transcript instead of a live call. Deliberately the
+ * loudest label in the interface after the alarm colour, because a recorded result
+ * rendered as a live one is the one mistake this project cannot make. */
+.rec {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  border: 1px solid var(--rule-3); border-left: 2px solid var(--warn);
+  background: var(--panel-2);
+  padding: 7px 11px 8px; margin-bottom: 14px;
+}
+.rec-tag {
+  font-size: 9px; letter-spacing: 0.2em; color: var(--warn); white-space: nowrap;
+}
+.rec-why { font-size: 10px; color: var(--faint); }
+.rec-cmd {
+  font-family: var(--mono); font-size: 10px; color: var(--dim);
+  background: #090b0a; border: 1px solid var(--rule); padding: 1px 6px;
+}
+
+/* ═══════════════════════════════════════════════════════════════ MEMORY DECIDES ══ */
+
+.md { padding: 14px 18px 30px; }
+.md-lede {
+  font-family: var(--serif); font-size: 13px; line-height: 1.6;
+  color: var(--dim); max-width: 84ch;
+}
+.md-lede em { color: var(--text); font-style: italic; }
+.md-lede-2 { margin-top: 9px; color: var(--faint); }
+.md-wait { font-size: 11px; color: var(--faint); margin-top: 16px; }
+
+/* The track. Three slots side by side, because the claim is a value CHANGING and a
+ * change is only legible against the thing it changed from. The decision is set in the
+ * serif at 30px — the second-largest type on the page after the money shot — and the
+ * cause sits directly beneath it, so the eye reads down a column rather than hunting. */
+.md-track {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+  margin-top: 16px; max-width: 112ch;
+  border: 1px solid var(--rule-2);
+  background: var(--panel-2);
+}
+.mdt { padding: 11px 15px 13px; border-left: 2px solid var(--rule-2); min-width: 0; }
+.mdt-n { display: block; font-size: 8.5px; letter-spacing: 0.18em; color: var(--ghost); }
+.mdt-act {
+  display: block; margin-top: 1px;
+  font-family: var(--serif); font-size: 30px; line-height: 1.05;
+  letter-spacing: 0.01em; color: var(--ghost);
+}
+.mdt-because {
+  display: block; margin-top: 6px;
+  font-size: 10px; line-height: 1.45; color: var(--faint);
+}
+.mdt-arrow {
+  align-self: center; font-style: normal;
+  color: var(--rule-3); font-size: 15px; padding: 0 2px;
+}
+
+/* Colour is the ACTION, never the position — an escalation in slot 1 would be the same
+ * blue. RESEND is body colour because it is the safe default, not a success; ESCALATE is
+ * --hold, which is what this panel already spends on "a human owns it". Neither is a
+ * value judgement, and neither gets the alarm colour, because neither is a failure. */
+.mdt.is-set .mdt-act.a-RESEND   { color: var(--text); }
+.mdt.is-set .mdt-act.a-ESCALATE { color: var(--hold); }
+.mdt.is-set .mdt-act.a-REPLAN   { color: var(--warn); }
+.mdt.is-set.a-RESEND   { border-left-color: var(--rule-3); }
+.mdt.is-set.a-ESCALATE { border-left-color: var(--hold); background: var(--hold-bg); }
+.mdt.is-set.a-REPLAN   { border-left-color: var(--warn); }
+
+@keyframes md-land { 0% { background: #262e2b; } 100% { background: inherit; } }
+.mdt.is-fresh, .mdx.is-fresh { animation: md-land .75s ease-out; }
+
+.md-flip {
+  font-family: var(--serif); font-size: 15px; color: var(--text);
+  margin-top: 12px; max-width: 84ch;
+}
+.md-flip.is-miss { color: var(--warn); font-size: 13px; }
+
+/* One run: what it decided, why, and every memory it decided on. */
+.mdx { margin-top: 20px; border-top: 1px solid var(--rule); padding-top: 11px; max-width: 112ch; }
+.mdx-head { display: flex; align-items: baseline; gap: 12px; }
+.mdx-n {
+  font-size: 9px; letter-spacing: 0.16em; color: var(--ghost);
+  border: 1px solid var(--rule-2); padding: 1px 5px;
+}
+.mdx-label { font-size: 12px; color: var(--text); }
+.mdx-act {
+  margin-left: auto; font-size: 11px; letter-spacing: 0.18em;
+  border: 1px solid var(--rule-2); padding: 2px 8px; color: var(--dim);
+}
+.mdx-act.a-RESEND   { color: var(--text); border-color: var(--rule-3); }
+.mdx-act.a-ESCALATE { color: var(--hold); border-color: #24404e; background: var(--hold-bg); }
+.mdx-act.a-REPLAN   { color: var(--warn); border-color: #4a3d16; }
+.mdx-why { font-size: 11px; line-height: 1.5; color: var(--dim); margin-top: 6px; max-width: 96ch; }
+.mdx-delta {
+  font-size: 10.5px; line-height: 1.5; color: var(--faint);
+  margin-top: 6px; border-left: 2px solid var(--rule-2); padding-left: 9px;
+}
+.mdx-delta.is-moved { color: var(--text); border-left-color: var(--hold); }
+.mdx-delta b { font-weight: 400; color: var(--hold); }
+.mdx-hits { margin-top: 8px; }
+
+/* The recalled memories reuse .hit from the recall panel unchanged. Two variants are
+ * added: the memories that CAN move a decision, and the ones that have just left the
+ * candidate set. */
+.hit.is-adverse .hit-content { color: var(--text); }
+.hit.is-adverse .simbar i { background: var(--hot); }
+.hit-tag {
+  font-size: 8.5px; letter-spacing: 0.14em; color: var(--hot);
+  border: 1px solid #4a3016; padding: 1px 5px; white-space: nowrap;
+}
+.hit-tag.is-gone-tag { color: var(--faint); border-color: var(--rule-2); }
+.mo { font-size: 9px; letter-spacing: 0.1em; }
+.mo-DUPLICATE_EFFECT { color: var(--hot); }
+.mo-HUMAN_REQUIRED   { color: var(--hold); }
+.mo-RESOLVED         { color: #3f8867; }
+
+.md-plan { margin-top: 22px; border-top: 1px solid var(--rule-2); padding-top: 11px; max-width: 112ch; }
+.md-plan-top { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+.md-plan-note { font-size: 10px; line-height: 1.5; color: var(--faint); max-width: 76ch; }
+.md-plan pre.json { margin-top: 8px; font-size: 10px; color: var(--faint); }
+
+.md-verdict {
+  font-family: var(--serif); font-size: 14px; line-height: 1.55;
+  margin-top: 16px; max-width: 84ch; color: var(--dim);
+}
+.md-verdict.is-proven   { color: var(--ok); }
+.md-verdict.is-unproven { color: var(--warn); }
+
+/* ═════════════════════════════════════════════════════════ STRIPE, IN THE LEDGER ══
+ *
+ * A band above the simulated ledger rather than a tab of its own: this tab is already
+ * about a provider's own books, and the argument is that the same crash survives against
+ * a book nobody here wrote. Capped in height so it can never push the ledger table it is
+ * introducing off the screen.
+ */
+.sp {
+  flex: 0 0 auto; max-height: 52%; overflow-y: auto;
+  border-bottom: 1px solid var(--rule-2);
+  background: var(--panel);
+}
+.sp-head {
+  display: flex; align-items: baseline; gap: 14px;
+  padding: 9px 14px 8px; border-bottom: 1px solid var(--rule);
+}
+.sp-id { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.sp-id h4 { font-size: 10px; letter-spacing: 0.18em; color: var(--text); }
+.sp-sub { font-size: 9.5px; letter-spacing: 0.06em; color: var(--faint); }
+.sp-flag {
+  margin-left: auto; font-size: 9px; letter-spacing: 0.16em;
+  border: 1px solid var(--rule-2); padding: 1px 6px; white-space: nowrap;
+}
+.sp-flag.is-live { color: var(--ok); border-color: #1f4436; }
+.sp-flag.is-rec  { color: var(--warn); border-color: #4a3d16; }
+.sp-head .btn-go { margin-left: auto; align-self: center; }
+.sp-flag + .btn-go { margin-left: 0; }
+.sp-body { padding: 11px 14px 14px; }
+.sp-lede {
+  font-family: var(--serif); font-size: 12.5px; line-height: 1.6;
+  color: var(--dim); max-width: 92ch;
+}
+.sp-lede em { color: var(--text); font-style: italic; }
+
+/* The six beats, as a wrapped rail rather than a list: it is a sequence, and a sequence
+ * reads left to right in a band this short. */
+.sp-steps {
+  list-style: none; margin: 0 0 12px; padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(232px, 1fr));
+  gap: 1px; background: var(--rule); border: 1px solid var(--rule);
+}
+.spx { background: var(--panel-2); padding: 6px 9px 7px; display: grid;
+       grid-template-columns: 16px minmax(0, 1fr); gap: 0 6px; }
+.spx b { grid-row: span 2; font-weight: 400; font-size: 10px; color: var(--ghost); padding-top: 1px; }
+.spx-l { font-size: 10.5px; color: var(--text); line-height: 1.35; }
+.spx-d { font-size: 9.5px; color: var(--faint); line-height: 1.4; word-break: break-word; }
+
+.sp-facts {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(178px, 1fr));
+  gap: 7px 20px; padding: 10px 0 2px; border-top: 1px solid var(--rule);
+}
+.spf { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.spf span { font-size: 8.5px; letter-spacing: 0.14em; color: var(--ghost); text-transform: uppercase; }
+.spf b { font-size: 12px; font-weight: 400; color: var(--text); overflow-wrap: anywhere; }
+.spf b.mono { font-size: 11px; color: var(--dim); }
+.spf b.is-hot { color: var(--hot); }
+.spf b.is-warn { color: var(--warn); }
+.spf b.is-alarm { color: var(--alarm); }
+
+.sp-verdict {
+  font-family: var(--serif); font-size: 13px; line-height: 1.55;
+  margin-top: 12px; max-width: 88ch; color: var(--dim);
+}
+.sp-verdict em { color: var(--text); font-style: italic; }
+.sp-verdict.is-proven { color: var(--ok); }
+.sp-verdict.is-unproven { color: var(--warn); }
+.sp-foot { margin-top: 9px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.sp-link { font-size: 10.5px; color: var(--hold); text-decoration: none; border-bottom: 1px solid #24404e; }
+.sp-link:hover { color: var(--text); border-bottom-color: var(--rule-3); }
+.sp-link-note { font-size: 9.5px; color: var(--ghost); }
+
+/* ═══════════════════════════════════════════════════════════════ BEYOND REFUNDS ══ */
+
+.dm { padding: 14px 18px 30px; }
+.dm-tbl { margin-top: 16px; max-width: 118ch; font-size: 11px; }
+.dm-tbl .dm-t { color: var(--text); white-space: nowrap; }
+.dm-tbl .dm-n { color: var(--dim); white-space: nowrap; }
+.dm-tbl .dm-u code { font-family: var(--mono); font-size: 10.5px; color: var(--hold); }
+/* The ceiling is the whole point of the table, so it is the only column set larger than
+ * the body — a number in the action's own unit, sitting where dollars would be. */
+.dm-tbl .dm-c { font-size: 14px; color: var(--text); white-space: nowrap; }
+.dm-tbl .dm-d { color: var(--faint); line-height: 1.45; }
+.dm-src { margin-top: 7px; font-size: 9.5px; color: var(--ghost); }
+
+/* The second domain's money shot, built out of the first one's parts: same .bignum, same
+ * .money-sub, same .money-verdict. The unit under the number is the only difference, and
+ * that is exactly the claim. */
+.dm-shot {
+  margin-top: 22px; padding: 14px 16px 15px; max-width: 118ch;
+  border: 1px solid var(--rule-2); border-left: 2px solid var(--rule-3);
+  background: var(--panel-2);
+  display: grid; grid-template-columns: minmax(0, 210px) minmax(0, 1fr);
+  gap: 4px 26px; align-items: start;
+}
+.dm-shot.is-alarm { border-left-color: var(--alarm); }
+.dm-shot.is-alarm .bignum, .dm-shot.is-alarm .lbl { color: var(--alarm); }
+.dm-shot .bignum { font-size: 42px; }
+.dm-shot .money-sub { font-size: 11px; gap: 2px; padding-top: 4px; }
+.dm-shot .money-verdict { grid-column: 1 / -1; margin-top: 8px; }
+
+/* ─────────────────────────────────────────────────────────── eight tabs, not six ── */
+
+/* Two tabs were added, and a tab that has scrolled out of a hidden-scrollbar strip is a
+ * tab a judge will never find. The numbers go first (they are a shortcut hint, not
+ * information), then the tracking tightens. Measured at 1280 and 1440, which are the two
+ * widths this is recorded at. */
+@media (max-width: 1520px) {
+  .tab-n { display: none; }
+  .tab { padding: 9px 11px 8px; letter-spacing: 0.1em; }
+}
+@media (max-width: 1340px) {
+  .tab { padding: 9px 8px 8px; letter-spacing: 0.06em; }
+}
+
+@media (max-width: 1180px) {
+  .md-track { grid-template-columns: minmax(0, 1fr); }
+  .mdt-arrow { display: none; }
+  .mdt { border-left-width: 2px; border-top: 1px solid var(--rule); }
+  .dm-shot { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ───────────────────────────────────────── second pass, after looking at it ──
+ *
+ * Every rule below fixes something a screenshot showed rather than something the markup
+ * suggested: a placeholder em dash rendering as a 30px rule, a button wrapping onto two
+ * lines behind its own flag, a description column crushed to five words a line at 1280.
+ */
+
+/* An unfilled slot must read as "not answered yet", and an em dash set in a 30px serif
+ * reads as a horizontal rule. Shrink it and take it down to the ghost weight. */
+.mdt:not(.is-set) .mdt-act { font-size: 17px; color: var(--ghost); }
+
+/* Buttons never wrap. RUN IT AGAIN broke across two lines once the LIVE flag appeared
+ * beside it, which moved the whole Stripe header down half a line. */
+.btn { white-space: nowrap; }
+
+/* The Stripe band shares the ledger's scroller, so it sizes to its content and the table
+ * follows it down. Its own max-height is gone with the same rule that clipped a verdict. */
+.sp { max-height: none; overflow: visible; }
+/* Five facts, one row at 1280 and up: the replay flag, the two ids and the two counts
+ * belong on the same line — they are one sentence about one refund. */
+.sp-facts { grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); }
+/* Sticky above a sibling section inside a shared scroller: the header must paint over the
+ * band's own background when the table scrolls up under it. */
+#ledger-tbl th { background: var(--panel); }
+
+/* Fixed layout so the prose column keeps the width it needs. Auto layout gave RISK UNIT
+ * and CEILING their max-content and crushed WHAT THE CEILING MEANS to four words a line. */
+.dm-tbl { table-layout: fixed; }
+.dm-tbl th:nth-child(1), .dm-tbl td:nth-child(1) { width: 11%; }
+.dm-tbl th:nth-child(2), .dm-tbl td:nth-child(2) { width: 20%; }
+.dm-tbl th:nth-child(3), .dm-tbl td:nth-child(3) { width: 17%; }
+.dm-tbl th:nth-child(4), .dm-tbl td:nth-child(4) { width: 19%; }
+.dm-tbl .dm-n { white-space: normal; }
+
+/* The receipts strip is one line at 1280 with these tighter gutters, which is the width
+ * this demo is recorded at. It still wraps rather than scrolls below that. */
+@media (max-width: 1400px) {
+  .rc-i { padding: 0 8px; gap: 5px; }
+  .receipts { gap: 9px; }
+}
+
+/* The one string in the Stripe panel a judge has to leave with. It is Stripe's own
+ * response header and it does not get to break across two lines to save 30px. */
+.sp-facts .spf:first-child { grid-column: span 2; }
+.spf b.is-hot { white-space: nowrap; }
+
+/* The two Stripe ids need the same width for the same reason. A refund id is 27 characters
+ * with no break opportunity in it, which needs 195px and was being handed a 161px column —
+ * so `overflow-wrap: anywhere` snapped the last character onto a line of its own. These are
+ * the ids a judge copies into the Stripe dashboard to check the claim in the other party's
+ * UI; an id that ends in a hanging character reads as a rendering fault at exactly the
+ * moment the panel is asking to be believed. */
+.sp-facts .spf:has(b.mono) { grid-column: span 2; }
+
+/* ─────────────────────────────────────────── against the endpoints as shipped ──
+ *
+ * The API returns more than the drafted contract promised: the memory proof carries the
+ * receipt's key and the whole EXPLAIN, the broadcast carries a per-campaign rail, and
+ * /api/proofs reports whether this deployment can reach Stripe at all. These style what
+ * arrived.
+ */
+
+/* The key, printed once under the three runs. It is the quiet half of this panel's claim:
+ * the decision moved twice and the key on the receipt never moved at all. */
+.md-key {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  margin-top: 20px; padding: 9px 12px 10px;
+  border: 1px solid #4a3016; border-left-width: 2px; border-left-color: var(--hot);
+  background: var(--hot-bg); max-width: 112ch;
+}
+.md-key b { font-size: 12px; font-weight: 400; color: var(--text); word-break: break-all; }
+.md-same {
+  font-size: 9px; letter-spacing: 0.16em; color: var(--hot);
+  border: 1px solid #5a3315; padding: 1px 5px; white-space: nowrap;
+}
+.md-plan-src { font-size: 9.5px; color: var(--ghost); margin-top: 5px; }
+
+/* The campaign that crashed is the one to look at, so the relay's replay verdict gets the
+ * same --hot left rule the refund receipt gets. */
+.dm-steps { margin-top: 20px; }
+.spx.is-replay { border-left: 2px solid var(--hot); background: var(--hot-bg); }
+.spx.is-replay .spx-d { color: #bfa588; }
+
+.sp-note {
+  font-size: 11px; line-height: 1.5; color: var(--warn);
+  border-left: 2px solid #4a3d16; padding-left: 10px; margin-bottom: 11px; max-width: 88ch;
+}
+.sp-note b { font-weight: 400; color: var(--text); }
+
+/* Sub-facts inside the domains table: the operation a ceiling governs, the reversibility
+ * it assumes, and whether the number came from a live policy row or the proof's default. */
+.dm-op { font-size: 9px; letter-spacing: 0.06em; color: var(--ghost); margin-top: 2px; }
+
+/* The toast was pinned 14px off the bottom, which is now where the receipts strip lives.
+ * 46px clears the strip at its two-line height and is invisible at its one-line one. */
+.toast { bottom: 46px; }
+
+/* A Stripe id is 27 characters and belongs on one line: at 11px it wrapped after
+ * "re_3U47WUAwRnm0fQgO3ku7", which turns an identifier into two half-identifiers. */
+.spf b.mono { font-size: 10px; }
+
+/* The memory view stacks four fixed-height blocks above its scroller, and their sum can
+ * exceed the pane: the recall hit list was `flex: 0 0 auto`, so at 800px tall it pushed
+ * the store table past the bottom of the body row and under the receipts strip. Letting
+ * the hit list SHRINK is the whole fix — it already scrolls internally, so nothing is
+ * lost, and the blocks above it keep the size they were given. */
+.recall-hits { flex: 0 1 auto; min-height: 84px; }
+
+/* At 720p the rail's panels were compressing instead of scrolling, so UNSETTLED RECEIPTS
+ * printed its footnote on top of its own body. The rail already scrolls; the panels just
+ * have to refuse to shrink. */
+.rail > .panel { flex: 0 0 auto; }
+
+/* The ceiling is the column the eye lands on, and at 1280 "2,000 RECIPIENTS" ended one
+ * character away from the sentence in the next cell. Give it a real gutter. */
+.dm-tbl .dm-c { padding-right: 22px; }
+
+/* The gutter alone made it worse. The column is 19% of a fixed-layout table — 132px at
+ * 1280 — and "2,000 RECIPIENTS" set at 14px is 145px wide; `white-space: nowrap` meant it
+ * did not clip, it printed straight over the first word of the sentence beside it
+ * (measured: scrollWidth 145 vs clientWidth 132). Let it wrap. The break falls between
+ * the count and the unit, which is where a reader would put it anyway, and "$200.00" has
+ * no space in it so the money row is unaffected. */
+.dm-tbl .dm-c { white-space: normal; }

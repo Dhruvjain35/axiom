@@ -1,0 +1,134 @@
+{
+  "_README": [
+    "Every number in this file was MEASURED by running the command recorded beside it.",
+    "Nothing here is illustrative, and nothing here is computed by the API at request",
+    "time — GET /api/proofs serves these as RECORDED measurements and labels them as",
+    "such. The two facts that endpoint reports live (the crash-window count and whether",
+    "the vector index is still in the plan) are computed in axiom/api.py, not read from",
+    "here.",
+    "",
+    "To refresh a block: run its `command`, paste the numbers, update `measured_at`.",
+    "`in_use` on a tool entry is the fact, not a guess parsed out of the status prose:",
+    "true means it is part of the running deployed system TODAY. Bedrock was verified",
+    "live but no model is enabled on the deployment account, and the CloudFront",
+    "distribution serves no traffic — both are false, and a footer that counts them as",
+    "in use is the exact species of overclaim this project argues against.",
+    "The file lives beside the code rather than in docs/ because vercel.json's",
+    "excludeFiles trims docs/ and scripts/ out of the deployed function bundle."
+  ],
+
+  "tests": 208,
+
+  "chaos": {
+    "workers_sigkilled": 30,
+    "worker_restarts": 42,
+    "approvals_answered": 3,
+    "tasks_terminal": 30,
+    "tasks_total": 30,
+    "refunds_created": 18,
+    "dollars_moved_cents": 204204,
+    "idempotent_replays": 6,
+    "duplicate_refunds": 0,
+    "wall_clock_seconds": 94.1,
+    "command": "python scripts/chaos_demo.py --workers 3 --kill-every 1.8 --quiet",
+    "measured_at": "2026-08-11",
+    "where": "CockroachDB Cloud v26.2.5, cluster axiom-memory (BASIC, AWS us-east-1), AXIOM_OFFLINE=1",
+    "also": "33 kills / 5 replays / 0 duplicates / 62.4s on an isolated single local node v26.2.3 — the result does not depend on the topology",
+    "recorded": true
+  },
+
+  "scale": {
+    "completed_tasks_start": 30,
+    "completed_tasks_end": 100030,
+    "work_growth_x": 3334.3,
+    "claim_latency_growth_x": 1.33,
+    "claim_index_rows_start": 30,
+    "claim_index_rows_end": 30,
+    "claim_p50_ms_start": 20.58,
+    "claim_p50_ms_end": 27.34,
+    "claim_p95_ms_end": 70.74,
+    "command": "python scripts/scale_bench.py --to 100000",
+    "measured_at": "2026-08-12",
+    "where": "single local node, CockroachDB v26.2.3",
+    "claim": "Claim cost tracks OUTSTANDING work, not total work ever done: finished tasks leave the partial claim index. Scoped honestly — this is a statement about the INDEX, not about distributed throughput.",
+    "recorded": true
+  },
+
+  "counterexample": {
+    "baseline_refunds": 2,
+    "baseline_dollars_cents": 60000,
+    "axiom_refunds": 1,
+    "axiom_dollars_cents": 30000,
+    "overcharge_cents": 30000,
+    "axiom_replays": 1,
+    "command": "python scripts/counterexample.py",
+    "measured_at": "2026-08-11",
+    "where": "same crash instant (W4), same provider database, one order, both agents",
+    "claim": "A fair transcript-memory baseline, killed at the same instant against the same provider, pays $600 for one $300 order. AXIOM pays $300.",
+    "recorded": true
+  },
+
+  "cockroach_tools": [
+    {
+      "name": "Distributed Vector Indexing",
+      "status": "In use, verified on Cloud",
+      "in_use": true,
+      "detail": "Two C-SPANN indexes on axiom_memory.embedding: axiom_memory_ann_by_context (four prefix columns, the recovery path) and axiom_memory_ann_by_tenant (broad recall). vector_cosine_ops written explicitly — omitting the opclass silently gives L2 and a <=> query then full-scans. Index use is asserted from EXPLAIN at request time, not assumed."
+    },
+    {
+      "name": "Cloud Managed MCP Server",
+      "status": "In use, verified against the live server",
+      "in_use": true,
+      "detail": "axiom/audit_mcp.py speaks to https://cockroachlabs.cloud/mcp over streamable HTTP with a scoped service-account key, discovering each tool's arguments from tools/list. Verified end to end: it correctly answers \"was any order ever refunded twice?\" with the BASELINE agent's duplicates and none of AXIOM's. Containment is three layers: a SELECT-only role, a single-statement guard, and default_transaction_read_only."
+    },
+    {
+      "name": "ccloud CLI",
+      "status": "In use, verified",
+      "in_use": true,
+      "detail": "The cluster the measured results ran on (axiom-memory, BASIC, AWS us-east-1, v26.2.5) is administered entirely through ccloud; scripts/provision_ccloud.sh wraps provisioning plus all three migrations."
+    },
+    {
+      "name": "Agent Skills Repo",
+      "status": "Skill written and validated; PR not opened",
+      "in_use": false,
+      "detail": "skills/cockroachdb-application-development/implementing-crash-safe-work-queues/ passes cockroachlabs/cockroachdb-skills' own validate-spec.py --strict with zero errors and zero warnings. Their CONTRIBUTING.md asks contributors to agree scope in an issue first, so no PR has been opened."
+    }
+  ],
+
+  "aws_services": [
+    {
+      "name": "AWS Lambda",
+      "status": "Deployed and working; public URL blocked at the account level",
+      "in_use": true,
+      "detail": "axiom-api (FastAPI behind Mangum) and axiom-worker, both us-east-2, arm64, python3.13. Measured on the real deployment: cold start INIT 1447-2258 ms, warm /api/health 169 ms, /api/crash-windows 2.7 ms, peak 149 MB of 512. This account refuses anonymous Function URL invocation at the account level — the controlled experiment is in README.md."
+    },
+    {
+      "name": "Amazon Bedrock",
+      "status": "Verified live on a different AWS account; NOT enabled on the deployment account",
+      "in_use": false,
+      "detail": "amazon.titan-embed-text-v2:0 returns the 1024-dimension embedding the schema's VECTOR(1024) pins; anthropic.claude-sonnet-4-5 for exception triage. No model is enabled on the account the deployment runs in, so it runs AXIOM_OFFLINE=1 with deterministic stand-ins, and every number here was measured that way."
+    },
+    {
+      "name": "CloudFront",
+      "status": "Distribution exists, $0, serves no traffic — does not solve the 403",
+      "in_use": false,
+      "detail": "Created during the fallback attempt at a public front door. It costs nothing and starts working the moment the account restriction lifts."
+    },
+    {
+      "name": "ECS Fargate / ALB / S3",
+      "status": "Infrastructure written, never applied",
+      "in_use": false,
+      "detail": "Dockerfile and deploy/terraform/{ecs,alb,network,iam,logs}.tf exist. No cluster, service or task definition has been created."
+    }
+  ],
+
+  "sources": {
+    "tests": {
+      "command": "./.venv/bin/python -m pytest -q",
+      "measured_at": "2026-08-13",
+      "detail": "44 risk, 36 resilience, 24 adapter, 22 proof, 18 second-domain, 17 invariant, 15 Lambda-worker, 14 schema-sync, 13 crash-window, 5 recall-plan",
+      "where": "local single node, AXIOM_OFFLINE=1",
+      "caveat": "208 collected, 208 pass, 0 fail. This number is RECORDED, not computed at request time — a serverless function cannot run pytest — so it drifts the moment anyone adds a test. Re-run the command and update it in the same commit that adds one."
+    }
+  }
+}
