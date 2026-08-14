@@ -54,6 +54,29 @@
     "recorded": true
   },
 
+  "stripe": {
+    "charge_id": "ch_3U4A9yAwRnm0fQgO0yMnQJJz",
+    "refund_id": "re_3U4A9yAwRnm0fQgO0kOsC6Id",
+    "order_ref": "AXM-PROOF-4030f815",
+    "amount_cents": 30000,
+    "idempotency_key": "axm_bb4799e8afaed374341e70936556850c6d221e63b52d599f",
+    "receipt_number": "3048-6646",
+    "refunds_for_charge": 1,
+    "duplicates": 0,
+    "replayed": true,
+    "original_request": "req_8j6Q6lmQ5Y3ccx",
+    "replay_request": "req_6YcdVgQok3Aw3R",
+    "stripe_version": "2026-07-29.dahlia",
+    "receipt_url": "https://pay.stripe.com/receipts/payment/CAcaFwoVYWNjdF8xVTNub05Bd1JubTBmUWdPKO3l-dMGMgb4bd2uBwg6LBZcv4GoMO0FMmV-DWFTJUpeoHHbxRoqoPoTsQADbzXL31OObkBJBdSmdlhg",
+    "command": "POST /api/proof/stripe on https://axiom-one-sage.vercel.app, then the refund re-sent by hand from a plain terminal: curl https://api.stripe.com/v1/refunds -u sk_test_…: -H 'Idempotency-Key: axm_bb4799e8afaed374341e70936556850c6d221e63b52d599f' -d charge=ch_3U4A9yAwRnm0fQgO0yMnQJJz -d amount=30000 -d 'metadata[axiom_order_ref]=AXM-PROOF-4030f815'",
+    "measured_at": "2026-08-13",
+    "where": "Stripe test mode (livemode: false), API version 2026-07-29.dahlia, against the live Vercel deployment",
+    "claim": "Two Stripe calls, one refund. The second call came from a different machine with nothing but the idempotency key AXIOM had committed to CockroachDB BEFORE the crash, and Stripe returned the FIRST refund rather than creating a second — reporting idempotent-replayed: true and naming the earlier call in original-request: req_8j6Q6lmQ5Y3ccx. The key alone was sufficient.",
+    "verify": "receipt_url is Stripe's own hosted receipt page and needs no Stripe login; GET /stripe-receipt on the deployment redirects to it. dashboard_url resolves only for the sandbox owner.",
+    "caveat": "Stripe mints a fresh receipt_url token each time the charge is retrieved; the recorded token was checked to still return HTTP 200 unauthenticated on 2026-08-13. Idempotency keys expire at Stripe after 24 hours, so re-running the curl above today creates a SECOND refund instead of replaying — the replay evidence is this recorded run, not a repeatable command.",
+    "recorded": true
+  },
+
   "counterexample": {
     "baseline_refunds": 2,
     "baseline_dollars_cents": 60000,

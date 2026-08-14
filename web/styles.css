@@ -1674,6 +1674,18 @@ pre.json {
  * "re_3U47WUAwRnm0fQgO3ku7", which turns an identifier into two half-identifiers. */
 .spf b.mono { font-size: 10px; }
 
+/* The public receipt is the one link in this panel a stranger can actually open, and it
+ * used to sit at the same weight as the dashboard link that shows them a login screen.
+ * Sized and coloured to win that pairing outright: it is the evidence, the other is a
+ * convenience for the one person who already has the account. */
+.sp-link.is-pub { font-size: 12px; color: var(--ok); border-bottom-color: #2b4a35; }
+.sp-link.is-pub:hover { color: var(--text); border-bottom-color: var(--rule-3); }
+/* The request-id pair reads as prose under its own facts row, not crushed against it. */
+.sp-facts + .sp-lede { margin-top: 9px; }
+/* nowrap for the same reason .spf b.mono is sized down: it broke after "original-", and a
+ * header name split across two lines stops being a header name you can search Stripe for. */
+.sp-lede .mono { font-family: var(--mono); font-size: 11px; color: var(--hold); white-space: nowrap; }
+
 /* The memory view stacks four fixed-height blocks above its scroller, and their sum can
  * exceed the pane: the recall hit list was `flex: 0 0 auto`, so at 800px tall it pushed
  * the store table past the bottom of the body row and under the receipts strip. Letting

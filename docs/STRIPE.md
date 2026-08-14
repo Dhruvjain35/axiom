@@ -15,13 +15,15 @@ POST /api/proof/stripe        on the live demo
 
 ## A real run
 
+Measured 2026-08-13 against the live deployment.
+
 ```
-1  charge created            ch_3U491RAwRnm0fQgO0lgLyyP7
+1  charge created            ch_3U4A9yAwRnm0fQgO0yMnQJJz
 2  policy stopped it, a human approved
-3  receipt committed         axm_a04c69c00fab80196b9fabe0d9cfcb33e13c97e4c46e31f4
+3  receipt committed         axm_bb4799e8afaed374341e70936556850c6d221e63b52d599f
 4  refund sent to Stripe, worker A KILLED before recording it
 5  worker B recovered        fence e2 -> e3 · RESEND
-6  re-sent under the SAME key → re_3U491RAwRnm0fQgO0HX6b1w5   REPLAYED by Stripe
+6  re-sent under the SAME key → re_3U4A9yAwRnm0fQgO0kOsC6Id   REPLAYED by Stripe
 
    refunds for this order 1 · Stripe reported a replay: true · duplicates 0
 ```
@@ -29,17 +31,80 @@ POST /api/proof/stripe        on the live demo
 Verified independently, by querying Stripe directly rather than through AXIOM:
 
 ```
-$ curl https://api.stripe.com/v1/refunds/re_3U491RAwRnm0fQgO0HX6b1w5 -u sk_test_…:
-  re_3U491RAwRnm0fQgO0HX6b1w5 · succeeded · $300.00 · charge ch_3U491RAwRnm0fQgO0lgLyyP7
+$ curl https://api.stripe.com/v1/refunds/re_3U4A9yAwRnm0fQgO0kOsC6Id -u sk_test_…:
+  re_3U4A9yAwRnm0fQgO0kOsC6Id · succeeded · $300.00 · charge ch_3U4A9yAwRnm0fQgO0yMnQJJz
   metadata: axiom_idempotency_key, axiom_order_ref, axiom_request_fingerprint
 
-$ curl 'https://api.stripe.com/v1/refunds?charge=ch_3U491RAwRnm0fQgO0lgLyyP7' -u sk_test_…:
+$ curl 'https://api.stripe.com/v1/refunds?charge=ch_3U4A9yAwRnm0fQgO0yMnQJJz' -u sk_test_…:
   count: 1
 ```
 
 Every refund carries `metadata[axiom_order_ref]` and `metadata[axiom_idempotency_key]`, so
 any row in Stripe's dashboard can be traced back to the AXIOM receipt that authorized it.
-The demo prints a `dashboard.stripe.com/test/payments/ch_…` link for exactly that.
+
+## Checking it without a Stripe account
+
+The `dashboard.stripe.com/test/payments/ch_…` link the proof also returns is only useful to
+whoever owns the sandbox. To everyone else it is a login screen, which makes it worthless as
+evidence for exactly the reader who has the least reason to take our word for anything.
+
+Stripe hosts a second page per charge that needs no login — its own receipt, rendered by
+Stripe, on a `stripe.com` origin, showing the refund. Every run now returns it as
+`receipt_url`, and the deployment redirects to the recorded one:
+
+```
+https://axiom-one-sage.vercel.app/stripe-receipt
+```
+
+That is a 302 to Stripe. AXIOM does not proxy or re-render the page, deliberately: a page
+this deployment fetched and served back would be a page this deployment could have written.
+
+Receipt **#3048-6646**, `$300.00`, refunded.
+
+## Reproducing the replay from a plain terminal
+
+Nothing in the paragraph above requires AXIOM to be running, and that is the point worth
+testing. Anyone holding the same test key can send the refund again from any machine, with
+no AXIOM process involved, and the only thing carried over is the idempotency key AXIOM had
+already committed to CockroachDB **before** the crash:
+
+```
+$ curl https://api.stripe.com/v1/refunds -u sk_test_...: \
+    -H 'Idempotency-Key: axm_bb4799e8afaed374341e70936556850c6d221e63b52d599f' \
+    -d charge=ch_3U4A9yAwRnm0fQgO0yMnQJJz -d amount=30000 \
+    -d 'metadata[axiom_order_ref]=AXM-PROOF-4030f815' ...
+
+HTTP/2 200
+idempotency-key: axm_bb4799e8afaed374341e70936556850c6d221e63b52d599f
+idempotent-replayed: true
+original-request: req_8j6Q6lmQ5Y3ccx
+request-id: req_6YcdVgQok3Aw3R
+stripe-version: 2026-07-29.dahlia
+
+-> re_3U4A9yAwRnm0fQgO0kOsC6Id  succeeded  $300.00     refunds on that charge: 1
+```
+
+Two request ids, one refund. `request-id` is this call; `original-request` is Stripe
+pointing back at the call made *before* the crash, and saying that this one did not do
+anything new. That header is Stripe's answer, not AXIOM's — the ledger still reads one
+refund on the charge.
+
+The scope of what this shows is narrow and worth stating exactly:
+
+> The key AXIOM committed to CockroachDB before the crash is sufficient, **on its own,
+> from any machine**, to make Stripe return the original refund instead of creating a
+> second one.
+
+It does not show that Stripe's idempotency is impressive — Stripe's idempotency is
+table stakes, and the section below concedes it. It shows that the key is the entire
+input to that mechanism, and that keeping it across a crash is a storage problem the
+provider cannot solve for you.
+
+Two caveats on the command itself. It is a **replay**, so it is not idempotent in the
+colloquial sense of "safe to run whenever": run it more than 24 hours after the original,
+once Stripe has expired the key, and it creates a *second* refund rather than replaying the
+first. And it only replays if every parameter matches the original byte for byte — a
+changed amount returns `400`, which is the W7 case in the table below.
 
 ## Test mode, and why that is not a dodge
 
@@ -117,3 +182,12 @@ itself stays in the sandbox on purpose: it is the evidence.
   charges.
 - **If Stripe is unreachable**, the panel shows a recorded past run, labelled as recorded.
   It never fabricates a live result.
+- **The public receipt link is a bearer URL.** Anyone holding it can open the page, which
+  is the property that makes it useful here and would be the wrong default for a live
+  charge. Stripe also mints a fresh token each time the charge is retrieved, so the
+  recorded link is one of several valid ones rather than the canonical one; it was checked
+  to still return `200` unauthenticated on 2026-08-13.
+- **`original-request` is shown for the recorded run only.** `create_refund` does not yet
+  keep Stripe's `request-id` and `original-request` response headers, so a live run in the
+  UI reports the replay flag without the two ids behind it. The panel omits the row rather
+  than filling it in from the recorded run.

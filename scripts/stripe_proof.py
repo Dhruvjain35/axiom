@@ -89,7 +89,10 @@ def main() -> int:
     print(f'    Stripe reported a replay      {out["replayed"]}')
     print(f'    duplicate refunds             {out["duplicates"]}')
     print(f'    charge                        {out["charge_id"]}')
-    print(f'    dashboard                     {out["dashboard_url"]}')
+    print(f'    dashboard (owner only)        {out["dashboard_url"]}')
+    # The link a reader without a Stripe account can actually open. Printed last because
+    # it is the one worth copying out of this output.
+    print(f'    receipt (PUBLIC, no login)    {out.get("receipt_url") or "—"}')
     print('=' * 74)
 
     if out['verdict'] == 'PASS':

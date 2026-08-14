@@ -546,6 +546,7 @@ def stripe_proof(*, amount_cents: int = STRIPE_PROOF_CENTS,
                       '(scripts/stripe_proof.py).',
             'steps': [], 'charge_id': None, 'refund_id': None, 'replayed': False,
             'refunds_for_order': 0, 'duplicates': 0, 'dashboard_url': None,
+            'receipt_url': None,
             'verdict': 'INCONCLUSIVE',
         }
 
@@ -680,6 +681,22 @@ def stripe_proof(*, amount_cents: int = STRIPE_PROOF_CENTS,
         if not keep:
             _wipe_tenant(tenant_id, agents)
 
+    # Stripe's own PUBLIC receipt for the charge, so the claim can be checked by someone
+    # who has no Stripe account at all. Fetched OUTSIDE the try above, deliberately: this
+    # is how the result is PRESENTED, not part of what is being proved, and a failed GET
+    # for a link must never be able to turn a proven run into an INCONCLUSIVE one. It is
+    # also read after the crash sequence has finished, so it cannot perturb it.
+    public_receipt: str | None = None
+    if charge:
+        try:
+            public_receipt = stripe_provider.receipt_url(charge)
+        except Exception as e:                   # noqa: BLE001 — a link is not evidence
+            log.warning('no public receipt for %s: %s: %s', charge, type(e).__name__, e)
+    if public_receipt:
+        step(8, "verify it in STRIPE's interface, without a Stripe account",
+             f'{public_receipt} — Stripe renders this page itself and it opens for '
+             f'anyone; the dashboard link beside it needs the sandbox owner signed in')
+
     ok = bool(crashed and len(mine) == 1 and replayed and not dupes and not error)
     out = {
         'available': True,
@@ -692,10 +709,15 @@ def stripe_proof(*, amount_cents: int = STRIPE_PROOF_CENTS,
         'crashed': crashed,
         'amount_cents': amount_cents,
         'order_ref': order,
-        # Stripe's own interface, so the claim can be checked in the other party's UI
-        # rather than in ours. Requires access to the sandbox account, which is stated
-        # rather than implied.
+        # Both links land in Stripe's interface rather than ours, and they are NOT
+        # interchangeable — which is why they are named apart rather than merged:
+        #   dashboard_url  the sandbox OWNER's view. Richer, and a login wall to anyone
+        #                  else, so it proves nothing to the reader who most needs proof.
+        #   receipt_url    Stripe's own hosted receipt, rendered by Stripe, showing the
+        #                  refund, and open to ANYONE holding the link. This is the one a
+        #                  reviewer can check.
         'dashboard_url': f'https://dashboard.stripe.com/test/payments/{charge}' if charge else None,
+        'receipt_url': public_receipt,
         'ledger': mine,
         'verdict': 'PASS' if ok else 'INCONCLUSIVE',
         'elapsed_ms': b.elapsed_ms,

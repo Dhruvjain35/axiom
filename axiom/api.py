@@ -64,7 +64,7 @@ import uuid
 import psycopg
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
@@ -1284,6 +1284,81 @@ def proofs_index() -> dict:
         if 'Vector' in tool.get('name', ''):
             tool['verified_live'] = vec.get('in_use')
     return out
+
+
+@app.get('/stripe-receipt', include_in_schema=False)
+def stripe_receipt() -> Response:
+    """302 to STRIPE's own receipt page for the recorded run. No Stripe login needed.
+
+    The point of this route is that it is short enough to be read aloud and typed from a
+    paused video. `/api/proof/stripe` returns a `receipt_url` on every live run, but that
+    URL is a 180-character opaque token — unusable on screen, and the thing a reviewer
+    most needs is precisely the thing they cannot copy from a recording.
+
+    It redirects rather than proxying on purpose. The page a reviewer lands on has to be
+    served by Stripe, from a stripe.com origin, with Stripe's certificate on it. A page
+    this deployment fetched and re-served would be a page this deployment could have
+    written, which is the entire failure mode the link exists to close.
+
+    The destination is read from the measurements file, not hardcoded here, so the link
+    and the recorded evidence cannot drift apart: refreshing the run updates both or
+    neither. 302 and not 301 for the same reason — a permanent redirect would be cached
+    by browsers past the next time that value changes.
+
+    THE TOKEN ROTATES, WHICH IS WHY THIS ASKS STRIPE FIRST.
+    Stripe's receipt URL carries an opaque token, and that token is not stable for the
+    life of the charge: retrieving the same charge forty minutes after the run already
+    returned a different one. The recorded URL was still answering 200 at that point, so
+    old tokens are not revoked immediately — but "not immediately" is not a guarantee to
+    hang a link on, and judging runs from Aug 19 to Sep 15. A reviewer opening a dead
+    link in week four would conclude the evidence was never there.
+
+    So the live value wins and the recorded one is the fallback, in that order. If Stripe
+    is unreachable, or the key is absent (it is not set in every environment), the
+    recorded URL is served instead — it worked when it was written down, and a link that
+    might be stale beats no link at all. Either way the reviewer lands on stripe.com.
+
+    The lookup is cached for ten minutes. This is one GET against Stripe, but the route
+    is public and a crawler that follows it in a loop should not turn into API traffic.
+    """
+    recorded = (proofs.measurements().get('stripe') or {})
+    url = recorded.get('receipt_url')
+
+    charge = recorded.get('charge_id')
+    if charge and proofs.stripe_available():
+        fresh = _fresh_receipt_url(charge)
+        if fresh:
+            url = fresh
+
+    if not url:
+        raise HTTPException(
+            503, 'no Stripe receipt is recorded in axiom/measurements.json; run '
+                 'POST /api/proof/stripe, which returns a live receipt_url')
+    return RedirectResponse(url, status_code=302)
+
+
+@functools.lru_cache(maxsize=4)
+def _receipt_cache_slot(charge_id: str, bucket: int) -> str | None:
+    """Ask Stripe for the current receipt URL, at most once per `bucket`.
+
+    The bucket is a ten-minute epoch passed in by the caller, which is the whole cache
+    key strategy: a new bucket is a new argument tuple, so the entry expires by becoming
+    unreachable rather than by any invalidation logic. maxsize 4 keeps the last few
+    buckets and nothing else.
+
+    Never raises. A receipt link failing to refresh must not take out the route — the
+    caller still has the recorded URL, and a stale link is a far better outcome than a
+    500 on the one page a reviewer was told to open.
+    """
+    try:
+        from . import stripe_provider
+        return stripe_provider.receipt_url(charge_id)
+    except Exception:
+        return None
+
+
+def _fresh_receipt_url(charge_id: str) -> str | None:
+    return _receipt_cache_slot(charge_id, int(time.time()) // 600)
 
 
 # ============================================================================= DEMO

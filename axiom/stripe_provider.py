@@ -185,6 +185,25 @@ def create_test_charge(amount_cents: int, order_ref: str) -> str:
     return charge
 
 
+def receipt_url(charge_id: str) -> str | None:
+    """Stripe's own PUBLIC receipt page for a charge — no Stripe login required.
+
+    This exists because the obvious link is the wrong one. `dashboard.stripe.com/test/
+    payments/ch_…` is useful to whoever owns the sandbox and is a dead end for everybody
+    else: a stranger following it gets a login screen, not evidence. Stripe also hosts a
+    tokenised receipt per charge, rendered by Stripe, showing the refund — and it opens
+    for anyone holding the link. For a reviewer with no account, that is the difference
+    between checking the claim and taking it on faith.
+
+    Returns None rather than raising when the field is absent. `receipt_url` is null until
+    the charge settles, so a freshly created charge legitimately has no receipt yet, and
+    that is a "not yet", not a failure. Transport and API errors still raise ProviderError
+    out of `_call` like every other call in this module.
+    """
+    charge, _ = _call('GET', f'/charges/{urllib.parse.quote(charge_id, safe="")}')
+    return charge.get('receipt_url') or None
+
+
 # ------------------------------------------------------------------------- audit
 
 def ledger(limit: int = 100) -> list[dict]:

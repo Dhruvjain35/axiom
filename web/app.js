@@ -2508,29 +2508,39 @@ async function runDecides(fromTour) {
 /** A REAL Stripe test-mode run, from this repository. Real charge, real refund, real
  *  crash at W4, and Stripe's own idempotent-replayed header on the re-send.
  *
- *  Test mode moves no real money and the ids below are test ids; the dashboard link only
- *  resolves for someone logged into that account, which the panel says out loud rather
- *  than offering a link that 404s for a stranger. */
+ *  Test mode moves no real money and the ids below are test ids. Two links come out of a
+ *  run and they are not interchangeable: `dashboard_url` is the sandbox owner's view and
+ *  a login wall to everyone else, so it proves nothing to the reader who most needs
+ *  proof; `receipt_url` is Stripe's own hosted receipt, rendered by Stripe, showing the
+ *  refund, and it opens for anyone holding the link. The panel leads with the second.
+ *
+ *  Mirrors axiom/measurements.json's `stripe` block — same run, same ids. If one is
+ *  refreshed the other has to be, or the page and the receipts index disagree. */
 const STRIPE_RECORDED = {
-  measured: '2026-08-13 · Stripe test mode (sk_test_) · CockroachDB v26.2.3 (local) · '
-    + 'printed PASS',
-  command: 'AXIOM_STRIPE_KEY=sk_test_… ./.venv/bin/python scripts/stripe_proof.py',
-  order_ref: 'AXM-STRIPE-d71ae8',
-  charge_id: 'ch_3U47WUAwRnm0fQgO3vBr7Ueq',
-  refund_id: 're_3U47WUAwRnm0fQgO3ku7NhYE',
+  measured: '2026-08-13 · Stripe test mode (sk_test_, livemode false) · '
+    + 'POST /api/proof/stripe on the live deployment · verdict PASS',
+  command: 'curl -X POST https://axiom-one-sage.vercel.app/api/proof/stripe',
+  order_ref: 'AXM-PROOF-4030f815',
+  charge_id: 'ch_3U4A9yAwRnm0fQgO0yMnQJJz',
+  refund_id: 're_3U4A9yAwRnm0fQgO0kOsC6Id',
   amount_cents: 30000,
   replayed: true,
   refunds_for_order: 1,
   duplicates: 0,
-  dashboard_url: 'https://dashboard.stripe.com/test/payments/ch_3U47WUAwRnm0fQgO3vBr7Ueq',
+  dashboard_url: 'https://dashboard.stripe.com/test/payments/ch_3U4A9yAwRnm0fQgO0yMnQJJz',
+  receipt_url: 'https://pay.stripe.com/receipts/payment/CAcaFwoVYWNjdF8xVTNub05Bd1JubTBmUWdPKO3l-dMGMgb4bd2uBwg6LBZcv4GoMO0FMmV-DWFTJUpeoHHbxRoqoPoTsQADbzXL31OObkBJBdSmdlhg',
+  original_request: 'req_8j6Q6lmQ5Y3ccx',
+  replay_request: 'req_6YcdVgQok3Aw3R',
   verdict: 'PASS',
   steps: [
-    { n: 1, label: 'a real charge exists', detail: 'ch_3U47WUAwRnm0fQgO3vBr7Ueq · $300.00 · Stripe test mode' },
+    { n: 1, label: 'a real charge exists', detail: 'ch_3U4A9yAwRnm0fQgO0yMnQJJz · $300.00 · Stripe test mode' },
     { n: 2, label: 'policy stopped it, a human approved', detail: '$300.00 is over the unattended ceiling' },
-    { n: 3, label: 'receipt committed', detail: 'axm_f58e798f41f10fb19e36a3cfc2dc898a32… — GENERATED from immutable columns' },
+    { n: 3, label: 'receipt committed BEFORE the call', detail: 'axm_bb4799e8afaed374341e70936556850c6d221e63b52d599f — GENERATED from immutable columns' },
     { n: 4, label: 'refund sent, worker A KILLED', detail: 'crash window W4 — Stripe committed, AXIOM had not recorded it' },
     { n: 5, label: 'worker B recovered', detail: 'fence e2 → e3 · RESEND, from the receipt' },
-    { n: 6, label: 're-sent under the SAME key', detail: 're_3U47WUAwRnm0fQgO3ku7NhYE — Stripe replied idempotent-replayed: true' },
+    { n: 6, label: 're-sent under the SAME key', detail: 're_3U4A9yAwRnm0fQgO0kOsC6Id — Stripe replied idempotent-replayed: true' },
+    { n: 7, label: "STRIPE's own ledger, read back from the API", detail: '1 refund for AXM-PROOF-4030f815 · 0 duplicates' },
+    { n: 8, label: 'verify it in STRIPE’s interface, without a Stripe account', detail: 'receipt #3048-6646, rendered by Stripe at pay.stripe.com and open to anyone' },
   ],
 };
 
@@ -2603,16 +2613,45 @@ function renderStripe() {
     : `<p class="sp-verdict is-unproven">${esc(String(d.verdict || 'no verdict'))} — reported
         as-is.</p>`;
 
-  const link = d.dashboard_url
-    ? `<a class="sp-link" href="${esc(d.dashboard_url)}" target="_blank" rel="noopener noreferrer">
-         open in the Stripe dashboard &rarr;</a>
-       <span class="sp-link-note">resolves only for someone signed into that test account</span>`
+  // Two Stripe calls produced one refund, and Stripe will say so itself: the reply to the
+  // SECOND call carries `original-request` pointing back at the FIRST. That is the other
+  // party naming the earlier call rather than AXIOM claiming there was one. Rendered only
+  // when the data actually carries them — create_refund does not yet keep these headers,
+  // so a live run has none, and filling the gap from the recorded run would print recorded
+  // ids under a LIVE banner. An empty row is honest; a borrowed one is not.
+  const reqs = (d.original_request && d.replay_request)
+    ? `<div class="sp-facts">` +
+        `<div class="spf"><span>ORIGINAL-REQUEST (before the crash)</span>` +
+          `<b class="mono">${esc(d.original_request)}</b></div>` +
+        `<div class="spf"><span>REQUEST-ID (after recovery)</span>` +
+          `<b class="mono">${esc(d.replay_request)}</b></div>` +
+      `</div>` +
+      `<p class="sp-lede">Two different calls, one refund: Stripe answered the second by
+        handing back the first, and <em>named it</em> in the <span class="mono">original-request</span>
+        header.</p>`
     : '';
+
+  // The public receipt leads, and the owner-only dashboard follows it. Live first, then
+  // the recorded one — so a live run that Stripe has not issued a receipt for yet still
+  // offers the reader something openable instead of nothing.
+  const receipt = d.receipt_url || STRIPE_RECORDED.receipt_url;
+  const link =
+    (receipt
+      ? `<a class="sp-link is-pub" href="${esc(receipt)}" target="_blank" rel="noopener noreferrer">
+           Open Stripe's own receipt (no login) &rarr;</a>
+         <span class="sp-link-note">${d.receipt_url ? '' : 'from the recorded run · '}served by
+           Stripe at pay.stripe.com — no account needed</span>`
+      : '') +
+    (d.dashboard_url
+      ? `<a class="sp-link" href="${esc(d.dashboard_url)}" target="_blank" rel="noopener noreferrer">
+           open in the Stripe dashboard &rarr;</a>
+         <span class="sp-link-note">resolves only for someone signed into that test account</span>`
+      : '');
 
   box.innerHTML =
     (rec ? recordedFlag(STRIPE_RECORDED.measured
         + (SP.error ? ' · live endpoint: ' + SP.error : ''), STRIPE_RECORDED.command) : '') +
-    `<ol class="sp-steps">${steps}</ol>` + facts + verdict +
+    `<ol class="sp-steps">${steps}</ol>` + facts + reqs + verdict +
     `<div class="sp-foot">${link}</div>`;
 }
 
