@@ -36,6 +36,17 @@ import os
 os.environ.setdefault('DATABASE_URL',
                       'postgresql://root@localhost:26257/axiom?sslmode=disable')
 os.environ['AXIOM_OFFLINE'] = '1'            # deterministic embeddings, rule-based triage
+# Set rather than defaulted: AXIOM_COMPREHEND=1 exported in the developer's shell would
+# otherwise put a live AWS call on the triage path of every task this suite runs, and the
+# suite's whole value is that it is hermetic. tests/test_comprehend.py turns it on itself,
+# per test, and the one test that reaches AWS skips without credentials.
+os.environ['AXIOM_COMPREHEND'] = '0'
+# Same reasoning, higher stakes, and NOT covered by AXIOM_OFFLINE — see axiom/ses.py, which
+# explains why offline cannot be the switch that disarms SES on an account whose Bedrock
+# quota is structurally zero. Amazon SES has no idempotent send and no test mode: a stray
+# AXIOM_SES=1 in a developer's shell would make `pytest -q` put real messages on the wire
+# from the account being judged, against a 200/day sandbox. Set, not defaulted.
+os.environ['AXIOM_SES'] = '0'
 os.environ['AXIOM_LEASE_SECONDS'] = '1'      # so "wait for the lease to expire" costs 1.3s
 os.environ['AXIOM_HEARTBEAT_SECONDS'] = '3600'   # no fixture may silently renew a lease
 os.environ['AXIOM_PROVIDER_LATENCY_MS'] = '0'
@@ -78,7 +89,11 @@ def _harness_matches_env():
     If some module imported axiom.config before the block at the top of this file ran,
     lease_seconds is 20 and every crash-window test would sleep 20s or, worse, race.
     """
+    from axiom import comprehend                                    # noqa: PLC0415
     assert settings.offline, 'AXIOM_OFFLINE did not take: tests must not call Bedrock'
+    assert not comprehend.enabled(), (
+        'AXIOM_COMPREHEND is on: the invariant suite would call Amazon Comprehend on '
+        'every triage. The suite is hermetic by construction and must stay that way.')
     assert settings.lease_seconds == 1, (
         f'AXIOM_LEASE_SECONDS did not take (lease_seconds={settings.lease_seconds}); '
         'axiom.config was imported before conftest set the environment')

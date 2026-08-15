@@ -135,12 +135,23 @@ os.environ.setdefault('AXIOM_POOL_MAX', '2')
 # Requests are not the binding constraint either: 8,640 of 1,000,000.
 # The memory size itself is set on the function, not here — see the report.
 
-from axiom import lambda_worker, seed as seed_mod                    # noqa: E402
+from axiom import lambda_worker, seed as seed_mod, tracing           # noqa: E402
 from axiom.config import settings                                    # noqa: E402
 
 
 def _log(msg: str) -> None:
     print(f'[{time.strftime("%H:%M:%S")}] {msg}', flush=True)
+
+
+# X-RAY. Installed at cold start, once per execution environment, and a no-op unless the
+# function's tracing config is Active — see axiom/tracing.py. This is the ONE call site
+# that makes PREPARE, dispatch, SETTLE and RECOVER visible as subsegments; the engine
+# itself is untouched, so a local run of this file still needs no AWS anything.
+#
+# It belongs here rather than inside handler() because the wrapping is a mutation of
+# module attributes: doing it per invocation would re-wrap the wrappers on every warm
+# call and nest the instrumentation N deep.
+_TRACED = tracing.install()
 
 
 def _worker_ref(context) -> str:
@@ -211,15 +222,27 @@ def _seed(event: dict) -> dict:
 def handler(event, context=None):
     event = event or {}
     mode = str(event.get('mode', 'drain')).lower()
-    _log(f'invoke mode={mode} offline={settings.offline} '
+    _log(f'invoke mode={mode} offline={settings.offline} traced={_TRACED} '
          f'remaining={context.get_remaining_time_in_millis() if context else None}ms')
 
     try:
-        if mode == 'seed':
-            return _seed(event)
-        if mode in ('drain', 'chaos'):
-            return _drain(event, mode, context)
-        raise ValueError(f'unknown mode {mode!r}: expected "drain", "chaos" or "seed"')
+        # The enclosing subsegment exists so the four boundaries below it are read in
+        # context: `annotation.mode = "chaos"` in the X-Ray console selects the
+        # invocations that were ASKED to die, and this segment is the one that stays
+        # in_progress forever when one of them does — os._exit(9) never returns here.
+        with tracing.span(f'axiom.{mode}', mode=mode,
+                          offline=settings.offline) as sp:
+            if mode == 'seed':
+                out = _seed(event)
+            elif mode in ('drain', 'chaos'):
+                out = _drain(event, mode, context)
+            else:
+                raise ValueError(
+                    f'unknown mode {mode!r}: expected "drain", "chaos" or "seed"')
+            if sp is not None:
+                tracing.annotate(tasks=out.get('tasks'), agent=out.get('worker_ref'),
+                                 elapsed_ms=out.get('elapsed_ms'))
+            return out
     except Exception:
         # Log and RE-RAISE. Swallowing here would return a 200 with a plausible-looking
         # summary and let a broken invocation count as a success, which is the failure

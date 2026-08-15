@@ -125,7 +125,7 @@
       "name": "Amazon API Gateway (HTTP API)",
       "status": "In use — the public AWS front door",
       "in_use": true,
-      "detail": "https://nq0i2ob395.execute-api.us-east-2.amazonaws.com — $default route, AWS_PROXY payload 2.0, 20 req/s burst 40. uptime_check.sh passes 6/6 against it. Reproducible via deploy/lambda/apigateway.sh (--destroy tears it down). $0.00/month: HTTP APIs are 1M requests/month free through Aug 2027, past the Sep 15 judging deadline.",
+      "detail": "https://nq0i2ob395.execute-api.us-east-2.amazonaws.com — $default route, AWS_PROXY payload 2.0, 20 req/s burst 40. uptime_check.sh passes 6/6 against it. Reproducible via deploy/lambda/apigateway.sh (--destroy tears it down). NOT free here, and this line said '$0.00/month: HTTP APIs are 1M requests/month free through Aug 2027' until 2026-08-14 — which contradicted this file's own cost block. The 1M allowance is a TWELVE-MONTH offer and this account has none (accountPlanType PAID, 12 free-tier entries, all 'Always Free', zero '12 Months Free'), so requests bill at $1.00/M from the first one. Nothing bills at rest: API Gateway is per-request, so an idle HTTP API still costs nothing.",
       "why_it_works": "A Function URL needs lambda:InvokeFunctionUrl for an ANONYMOUS principal, evaluated by the Function URL front end — that is what this account withholds. API Gateway needs lambda:InvokeFunction for the NAMED service principal apigateway.amazonaws.com, evaluated by the Lambda control plane, and it is honored normally. Both doors are live on the same function right now, which makes the account restriction a demonstration rather than an assertion: Function URL 403, HTTP API 200, same function, same moment."
     },
     {
@@ -160,6 +160,79 @@
       "status": "Infrastructure written, never applied",
       "in_use": false,
       "detail": "Dockerfile and deploy/terraform/{ecs,alb,network,iam,logs}.tf exist. No cluster, service or task definition has been created — every one of those bills per hour rather than per request."
+    },
+    {
+      "name": "Amazon EventBridge Scheduler",
+      "status": "In use — keeps the demo alive across four unattended weeks",
+      "in_use": true,
+      "detail": "Schedule axiom-worker-sweep, rate(5 minutes), ENABLED, target axiom-worker with {\"mode\":\"drain\",\"seconds\":45,\"idle_exit\":true}. Verified firing: three separate invocations observed at 18:18, 18:23 and 18:24 local. This is what makes the board self-heal — judging runs Aug 19 to Sep 15 with nobody watching, and a queue that stalls on day three is a dead demo for the remaining four weeks. mode=drain, NOT chaos: the sweeper's job is to keep the demo healthy, and a background process that deliberately kills itself would make the error alarm meaningless. Chaos stays where a human triggers it."
+    },
+    {
+      "name": "Amazon CloudWatch",
+      "status": "In use — 5 alarms, 1 dashboard, and it has already paged a human",
+      "in_use": true,
+      "detail": "axiom-api-errors, axiom-api-throttles, axiom-http-5xx, axiom-worker-errors, axiom-worker-silent, plus a dashboard. Thresholds are deliberately loose enough to survive AXIOM's own design: the demo crashes its worker ON PURPOSE at crash window W4, so axiom-worker-errors needs >30 errors in 15 minutes twice rather than >0, or every judge pressing RUN MISSION would page the owner. Proven end to end rather than assumed — an alarm was driven into ALARM state deliberately and the email arrived; its own history reads 'test complete, restored by observability.sh'. Always Free: 10 alarms, 1M requests, 5GB logs."
+    },
+    {
+      "name": "Amazon SNS",
+      "status": "In use — alarm delivery; subscription PENDING until the owner clicks confirm",
+      "in_use": true,
+      "detail": "Topic axiom-ops-alerts, email subscription to the account owner. Always Free: 1,000 notifications/month, far beyond what five alarms will emit. NOTE the subscription reads PendingConfirmation until the confirmation email is clicked, and re-running observability.sh replaces a confirmed subscription with a pending one — that is a defect in the script, not in SNS, and it silently disarms alerting."
+    },
+    {
+      "name": "AWS X-Ray",
+      "status": "In use — the crash-and-recovery path as a clickable trace",
+      "in_use": true,
+      "detail": "Active tracing on axiom-worker ONLY; axiom-api is deliberately PassThrough. An earlier revision of this entry said both, which was false — checked with aws lambda get-function-configuration and corrected. The distinction is not pedantry: an Active API behind a browser tab that polls would record a trace per poll and cost ~$1.73/month per open tab, over the $1.00 budget on one tab alone, while the worker's ~8,640 scheduled invocations a month cost about four cents. PassThrough means the API traces only when something upstream already decided to, and API Gateway tracing is off, so it records nothing. VERIFIED BY READING A REAL TRACE rather than by trusting the instrumentation: trace 1-6a7fb524-4be35a4b20bb6f981abc4b6a carries axiom.PREPARE, axiom.dispatch and axiom.SETTLE subsegments under an axiom.drain span, with these annotations actually present — PREPARE: prepare_outcome ('receipt' or 'parked_on_approval'), idempotency_key, amount_cents, task_id; dispatch: crash_window ('W4'), provider_status, idempotency_key; SETTLE: attempt_state, task_state, idempotency_key, task_id. Annotations are filterable in the console, so a judge can query crash_window = W4 and land on the exact instant this project is about — the provider has committed and AXIOM does not yet know — instead of reading a paragraph claiming it happens. The same trace shows three refunds over the $200 ceiling with prepare_outcome = parked_on_approval, which is the policy engine visible as telemetry. Sampling bounded at 5% plus a 1/sec reservoir. BILLED on this account at $5.00 per million traces recorded; realistic judging volume is a few thousand traces, so cents.",
+      "measured": {
+        "example_trace": "1-6a7fb524-4be35a4b20bb6f981abc4b6a",
+        "subsegments_observed": [
+          "axiom.drain",
+          "axiom.PREPARE",
+          "axiom.dispatch",
+          "axiom.SETTLE"
+        ],
+        "annotation_keys_observed": [
+          "prepare_outcome",
+          "idempotency_key",
+          "amount_cents",
+          "task_id",
+          "crash_window",
+          "provider_status",
+          "attempt_state",
+          "task_state",
+          "mode",
+          "agent"
+        ],
+        "command": "aws lambda get-function-configuration --function-name axiom-api --query TracingConfig.Mode ; aws xray batch-get-traces --trace-ids 1-6a7fb524-4be35a4b20bb6f981abc4b6a",
+        "measured_at": "2026-08-14",
+        "axiom_api_tracing": "PassThrough",
+        "axiom_worker_tracing": "Active",
+        "traces_last_hour": 5,
+        "projected_usd_per_month": 0.043
+      }
+    },
+    {
+      "name": "Amazon SES",
+      "status": "Sender verified, sending confirmed — wiring into the broadcast domain",
+      "in_use": false,
+      "detail": "Sender identity verified and a real send confirmed to Amazon's mailbox simulator (MessageId 010f01a0028ad822-005d6883-ca07-4c68-8189-afd522fbc98d-000000), which needs no recipient verification and touches no real inbox. Sandbox: 200 messages/day. SES is one of the twelve Always Free entries on this account. in_use stays false until the broadcast domain actually dispatches through it — the second worked example still uses the simulated relay today."
+    },
+    {
+      "name": "Amazon Comprehend",
+      "status": "Wired into triage behind an authority boundary, OFF by default, and NOT free here",
+      "in_use": false,
+      "detail": "axiom/comprehend.py runs DetectKeyPhrases + DetectEntities + DetectSentiment over an exception description and may only NARROW what the rule table proposed: it can move an action toward escalate, never toward acting; it cannot move amount_cents at all (lowering $300 to $150 is self-authorization wearing a helpful face); it cannot raise its own confidence. assert_cannot_widen() enforces it and deliberately does not catch — an operational failure is absorbed a layer lower, so anything that escapes is a defect, and a defect that widens authority should fail the task. in_use is false because AXIOM_COMPREHEND is unset on both Vercel and Lambda, so it bills nothing while judges use the demo. BILLED on this account. accountPlanType is PAID with $0.00 remaining credits and twelve 'Always Free' entries and ZERO '12 Months Free' entries — so every free tier that is a twelve-month offer has expired here. Verified: aws freetier get-account-plan-state / get-free-tier-usage. $0.0001/unit; ~$0.09 spent on measurement.",
+      "measured": {
+        "latency_ms_p50_per_request": 58.5,
+        "latency_ms_p95_per_request": 128.2,
+        "latency_ms_p50_per_classify": 186.9,
+        "units_consumed": 189,
+        "cost_usd": 0.0189,
+        "agreement_with_rule_table": "9 of 16 texts carrying a ground-truth kind; rules correct 15/16, Comprehend correct 10/16, Comprehend silent 6/16",
+        "why_it_earns_its_place": "llm._KIND_RULES is first-match-wins with late_delivery ABOVE fraud_suspected, so 'delivery delayed nine days and an unauthorized charge appeared on the stolen card' at $150 triages as an unattended refund under the $200 ceiling. A/B against the real engine: AXIOM_COMPREHEND=0 settles and moves the money; =1 escalates, 0 receipts minted. Comprehend found a real ordering bug in the rule table.",
+        "command": "AWS_REGION=us-east-2 python scripts/comprehend_demo.py --json"
+      }
     }
   ],
   "sources": {
@@ -184,5 +257,29 @@
     "recorded": true,
     "corpus_size_moves": "2,511 at the moment of the relabel, and it will not read exactly that later. Every POST /api/proof/* run works in a tenant of its own and deletes it afterwards, so the row count breathes by a few dozen while a proof is in flight — an earlier read during one said 2,541. What is invariant, and what the relabel actually asserts, is that ZERO rows are unlabelled and zero matched neither embedder.",
     "unlabelled_rows": 0
+  },
+  "cost": {
+    "account_plan": "PAID · $0.00 remaining credits · 12 'Always Free' entries · 0 '12 Months Free'",
+    "always_free_here": [
+      "AWS Lambda",
+      "Amazon CloudWatch",
+      "Amazon SNS",
+      "Amazon SQS",
+      "AWS KMS",
+      "AWS Glue",
+      "Amazon SES"
+    ],
+    "billed_here": [
+      "Amazon API Gateway",
+      "AWS X-Ray",
+      "Amazon Comprehend"
+    ],
+    "month_to_date_usd": 0.0001021066,
+    "correction": "Earlier revisions of this repository claimed '$0.00/month'. That was true of the services in use at the time and is NOT true now: API Gateway, X-Ray and Comprehend have no free-tier entry on this account because their free tiers are twelve-month offers and this account is past that window. The honest number is cents, not zero, and a project that argues for precise measurement does not get to round its own bill down to a rounder number.",
+    "projection_through_judging": "Under $1.00 through Sep 15 at realistic judging volume. API Gateway $1.00/M requests, X-Ray $5.00/M traces recorded, Comprehend off in production.",
+    "guard": "AWS Budget axiom-zero-spend at $1.00 with notifications at 1%, 50% and 100% — so the owner is emailed at $0.01 before anything meaningful accrues.",
+    "measured_at": "2026-08-14",
+    "command": "aws ce get-cost-and-usage --granularity MONTHLY --group-by Type=DIMENSION,Key=SERVICE",
+    "recorded": true
   }
 }

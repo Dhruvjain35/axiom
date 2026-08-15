@@ -33,6 +33,33 @@ Recipients are derived deterministically from the campaign ref rather than passe
 40,000-element list, so a second send of the same campaign reaches the SAME addresses
 and the duplicate query can see it. A real gateway takes the list; nothing about the
 guarantee changes.
+
+THE REAL PATH: AMAZON SES, WHICH OFFERS NO IDEMPOTENCY AT ALL
+--------------------------------------------------------------
+`send(recipients=[...])` with AXIOM_SES=1 stops simulating and puts real messages on the
+wire through `axiom/ses.py`. Everything above still holds, and one thing sharpens: SES has
+no idempotency key. Call SendEmail twice and two emails arrive. There is no header to
+hand it, no replay flag to read back, no dedupe window. So on this path the four lines at
+the top of this file are not a model of what an ESP enforces — they are the ONLY place the
+guarantee exists anywhere in the system.
+
+Which forces the write order, and the write order is the whole design:
+
+    tx1   claim the idempotency key      COMMIT   <- durable, before anything irreversible
+    ---   no transaction is open here
+          SendEmail                               <- the act. Cannot be undone or asked about
+    ---   one small transaction per accepted message, carrying its MessageId
+    tx2   mark the send complete         COMMIT
+
+A key that already exists is answered from this store and SES is never called, which is
+what makes a second delivery impossible. A process that dies between the reservation and
+the record leaves a row that says `reserved` with no MessageId, and a later re-send under
+the same key is REFUSED rather than retried — the relay would rather lose a message than
+send one twice, because "we do not know whether that email went out" and "it did not go
+out" are not the same claim, and only one of them is safe to act on.
+
+That is at-most-once, stated plainly. Exactly-once across two systems with no shared
+transaction is not available from anybody, and this file does not pretend otherwise.
 """
 
 from __future__ import annotations
@@ -50,6 +77,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
+from .. import ses
 from ..config import settings
 from ..provider import ProviderCrash, ProviderError, fingerprint
 
@@ -134,6 +162,38 @@ _DDL = (
     )
     """,
     'CREATE INDEX IF NOT EXISTS relay_request_log_by_key ON relay_request_log (idempotency_key, received_at)',
+    # --- the real-SES columns, added rather than baked in --------------------------
+    # ADD COLUMN IF NOT EXISTS, not a rewritten CREATE TABLE: the relay already exists on
+    # the live cluster with rows in it, and a stand-in for a third-party system that
+    # silently changes shape under a running demo is worse than one that migrates.
+    #
+    # channel is what stops the two paths lying about each other. A simulated delivery and
+    # a real SES delivery are both one row in relay_delivery, and only this column can
+    # answer "was there actually an email?" — an audit that cannot tell them apart would
+    # let the demo count 1,700 imaginary sends as evidence about Amazon SES.
+    #
+    # NULLABLE AND WITHOUT A DEFAULT, which is not a style preference. `NOT NULL DEFAULT
+    # 'simulated'` has to write the new value into every existing row, and this table holds
+    # 230,110 of them on the development cluster alone: the declarative schema changer
+    # enqueued the backfill and the node refused it outright — "store 1 has insufficient
+    # remaining capacity to ingest data (remaining: 2.9 GiB / 1.3%, min required: 5.0%)" —
+    # leaving a PAUSED schema-change job that had to be cancelled by hand. A migration that
+    # can strand a live demo's external system in a half-applied state, for a value every
+    # reader can already infer, is a bad trade. NULL means exactly "written before this
+    # column existed", which is precisely the simulated path, and the selects below say so
+    # with COALESCE.
+    'ALTER TABLE relay_send ADD COLUMN IF NOT EXISTS channel STRING',
+    'ALTER TABLE relay_delivery ADD COLUMN IF NOT EXISTS channel STRING',
+    # NULL for a simulated delivery, and the SES MessageId for a real one. It is the only
+    # handle anybody has on a message that has already left, so it is the evidence the
+    # crash proof reads: two dispatches, one MessageId.
+    'ALTER TABLE relay_delivery ADD COLUMN IF NOT EXISTS message_id STRING',
+    # How long SES took to accept this one message. Recorded on the delivery row rather
+    # than returned to the caller because the caller may not survive to receive it: at
+    # crash window W4 the response — MessageId, latency and all — is thrown away with the
+    # process. Anything worth measuring about the send has to be written down by the
+    # system that made it, before the system that asked for it dies.
+    'ALTER TABLE relay_delivery ADD COLUMN IF NOT EXISTS latency_ms INT8',
 )
 
 
@@ -197,17 +257,59 @@ atexit.register(close_pool)
 # ---------------------------------------------------------------------- the send
 
 def _log(cur, key: str, fp: str, campaign_ref: str, n: int, verdict: str,
-         status: int) -> None:
+         status: int) -> Any:
+    """One row per REQUEST, and the row id, so a request whose verdict is not yet known
+    can be settled later instead of logged twice. See _dispatch_live()."""
     cur.execute("""
         INSERT INTO relay_request_log
             (idempotency_key, request_fingerprint, campaign_ref, recipient_count,
              verdict, http_status)
         VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id
     """, (key, fp, campaign_ref, n, verdict, status))
+    return cur.fetchone()['id']
+
+
+def _reject_or_replay(cur, existing: dict, *, idempotency_key: str, fp: str,
+                      campaign_ref: str, recipient_count: int) -> dict:
+    """The two answers a known key can get. Shared by both dispatch paths verbatim,
+    because a guarantee that is spelled differently in two places is a guarantee that
+    will eventually disagree with itself.
+
+    Raises ProviderError(409) when the same key arrives with a different body — crash
+    window W7, a NEW INTENT wearing an OLD key.
+    """
+    if existing['request_fingerprint'] != fp:
+        _log(cur, idempotency_key, fp, campaign_ref, recipient_count,
+             'rejected_fingerprint', 409)
+        return {}                    # caller commits, then raises; see below
+    cur.execute("""
+        UPDATE relay_send
+        SET replay_count = replay_count + 1, last_seen_at = now()
+        WHERE idempotency_key = %s
+        RETURNING replay_count
+    """, (idempotency_key,))
+    replays = cur.fetchone()['replay_count']
+    _log(cur, idempotency_key, fp, campaign_ref, recipient_count, 'replayed', 200)
+    return {'id': existing['send_ref'], 'campaign_ref': existing['campaign_ref'],
+            'segment': existing['segment'],
+            'recipient_count': existing['recipient_count'],
+            'status': existing['status'], 'idempotent_replay': True,
+            'replay_count': replays, 'http_status': 200, 'replayed': True,
+            'channel': existing.get('channel', 'simulated')}
+
+
+_SELECT_SEND = """
+    SELECT send_ref, request_fingerprint, campaign_ref, segment,
+           recipient_count, status, replay_count,
+           COALESCE(channel, 'simulated') AS channel
+    FROM relay_send WHERE idempotency_key = %s
+"""
 
 
 def send(*, idempotency_key: str, campaign_ref: str, segment: str, recipient_count: int,
          request_body: dict[str, Any] | None = None,
+         recipients: Sequence[str] | None = None,
          chaos_pre: float | None = None, chaos_post: float | None = None,
          latency_ms: int | None = None) -> dict:
     """Deliver a campaign to a segment. THE irreversible act.
@@ -220,6 +322,13 @@ def send(*, idempotency_key: str, campaign_ref: str, segment: str, recipient_cou
     the send and AXIOM's settle is harmless because the recovered worker re-sends under
     the SAME derived key and this function returns the original send instead of putting
     a second copy in every inbox.
+
+    `recipients` is the real-gateway shape — an explicit address list rather than a count.
+    With AXIOM_SES=1 and a list present, those addresses receive REAL email through Amazon
+    SES and every guarantee above is enforced by this store alone, because SES has no
+    idempotency of its own. With the flag off, or with no list, this is byte-for-byte the
+    simulated path it has always been: the demo a judge presses does not change behaviour
+    unless somebody arms it.
     """
     import random
 
@@ -232,6 +341,29 @@ def send(*, idempotency_key: str, campaign_ref: str, segment: str, recipient_cou
     if pre and random.random() < pre:
         raise RelayCrash('CHAOS: died after PREPARE, before the send left (W2)')
 
+    if recipients and ses.enabled():
+        out = _dispatch_live(idempotency_key=idempotency_key, campaign_ref=campaign_ref,
+                             segment=segment, recipient_count=recipient_count,
+                             recipients=list(recipients), fp=fp)
+    else:
+        out = _dispatch_simulated(
+            idempotency_key=idempotency_key, campaign_ref=campaign_ref, segment=segment,
+            recipient_count=recipient_count, fp=fp,
+            latency_ms=latency_ms)
+
+    # --- crash window POST: every message is in an inbox, AXIOM has not recorded it ---
+    post = settings.chaos_crash_after_dispatch if chaos_post is None else chaos_post
+    if post and random.random() < post:
+        raise RelayCrash('CHAOS: died after the campaign went out, before settle (W4)')
+
+    return out
+
+
+def _dispatch_simulated(*, idempotency_key: str, campaign_ref: str, segment: str,
+                        recipient_count: int, fp: str,
+                        latency_ms: int | None) -> dict:
+    """The stand-in ESP. Unchanged behaviour, moved into a function so the real path can
+    sit beside it and be read against it."""
     time.sleep((settings.provider_latency_ms if latency_ms is None else latency_ms) / 1000.0)
 
     with pool().connection() as conn:
@@ -240,36 +372,18 @@ def send(*, idempotency_key: str, campaign_ref: str, segment: str, recipient_cou
         # AXIOM, which still cannot see inside it.
         conn.autocommit = False
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT send_ref, request_fingerprint, campaign_ref, segment,
-                       recipient_count, status, replay_count
-                FROM relay_send WHERE idempotency_key = %s
-            """, (idempotency_key,))
+            cur.execute(_SELECT_SEND, (idempotency_key,))
             existing = cur.fetchone()
 
             if existing:
-                if existing['request_fingerprint'] != fp:
-                    _log(cur, idempotency_key, fp, campaign_ref, recipient_count,
-                         'rejected_fingerprint', 409)
+                out = _reject_or_replay(cur, existing, idempotency_key=idempotency_key,
+                                        fp=fp, campaign_ref=campaign_ref,
+                                        recipient_count=recipient_count)
+                if not out:
                     conn.commit()
                     raise ProviderError(
                         'idempotency key reused with a different request body',
                         status=409, retryable=False)
-
-                cur.execute("""
-                    UPDATE relay_send
-                    SET replay_count = replay_count + 1, last_seen_at = now()
-                    WHERE idempotency_key = %s
-                    RETURNING replay_count
-                """, (idempotency_key,))
-                replays = cur.fetchone()['replay_count']
-                _log(cur, idempotency_key, fp, campaign_ref, recipient_count,
-                     'replayed', 200)
-                out = {'id': existing['send_ref'], 'campaign_ref': existing['campaign_ref'],
-                       'segment': existing['segment'],
-                       'recipient_count': existing['recipient_count'],
-                       'status': existing['status'], 'idempotent_replay': True,
-                       'replay_count': replays, 'http_status': 200, 'replayed': True}
             else:
                 ref = 'msg_' + uuid.uuid4().hex[:20]
                 cur.execute("""
@@ -291,15 +405,189 @@ def send(*, idempotency_key: str, campaign_ref: str, segment: str, recipient_cou
                      'created', 201)
                 out = {'id': ref, 'campaign_ref': campaign_ref, 'segment': segment,
                        'recipient_count': recipient_count, 'status': 'sent',
-                       'idempotent_replay': False, 'http_status': 201, 'replayed': False}
+                       'idempotent_replay': False, 'http_status': 201, 'replayed': False,
+                       'channel': 'simulated'}
         conn.commit()
 
-    # --- crash window POST: every message is in an inbox, AXIOM has not recorded it ---
-    post = settings.chaos_crash_after_dispatch if chaos_post is None else chaos_post
-    if post and random.random() < post:
-        raise RelayCrash('CHAOS: died after the campaign went out, before settle (W4)')
-
     return out
+
+
+# ------------------------------------------------------------- the real path: SES
+
+def _deliveries(cur, send_ref: str) -> list[dict]:
+    cur.execute("""
+        SELECT recipient, message_id, latency_ms,
+               COALESCE(channel, 'simulated') AS channel
+        FROM relay_delivery WHERE send_ref = %s ORDER BY delivered_at
+    """, (send_ref,))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def _dispatch_live(*, idempotency_key: str, campaign_ref: str, segment: str,
+                   recipient_count: int, recipients: list[str], fp: str) -> dict:
+    """Real email, through Amazon SES, deduplicated by this store and nothing else.
+
+    Three transactions and one irreversible act between them, in this order and no other:
+
+      1. CLAIM THE KEY, COMMIT. After this line a second call under the same key can be
+         answered without asking SES anything, which is the only reason a second email
+         cannot happen. Committed BEFORE the send because a reservation written after the
+         act protects nothing.
+      2. SEND, outside any transaction, one message at a time, recording each MessageId in
+         its own small transaction the instant SES returns it. Per-message rather than a
+         single write at the end so the unrecorded window is one message wide instead of
+         the whole campaign.
+      3. MARK IT COMPLETE, and settle the request-log row that step 1 opened.
+
+    A failure between 1 and 3 leaves `status='reserved'`. The next call under that key is
+    answered as a replay and sends NOTHING — see the module docstring: losing a message is
+    a bad afternoon, and sending one twice is a compliance incident, so the ambiguous case
+    resolves toward silence. The one exception is a failure the sender can prove happened
+    before SES accepted anything, which releases the reservation so the campaign is not
+    permanently burned by a typo in an address.
+    """
+    # The audience the policy authorized may be smaller than the list (triage is allowed
+    # to trim and never to widen), so the effective fanout is the smaller of the two.
+    fanout = recipients[:min(len(recipients), recipient_count)]
+    if not fanout:
+        raise ProviderError('no deliverable recipients for this campaign',
+                            status=400, retryable=False)
+    if len(fanout) > ses.max_per_send():
+        # REFUSE rather than truncate. Silently mailing the first 5 of 1,000 addresses
+        # would put a number in the ledger that means nothing and would read, to anyone
+        # checking, as a campaign that succeeded. Raising AXIOM_SES_MAX_PER_SEND is a
+        # decision somebody makes on purpose against a 200/day sandbox.
+        raise ProviderError(
+            f'{len(fanout)} recipients exceeds AXIOM_SES_MAX_PER_SEND='
+            f'{ses.max_per_send()}; refusing to mail part of a campaign and call it sent',
+            status=400, retryable=False)
+    for addr in fanout:
+        ses.guard(addr)              # refuse the whole campaign before sending any of it
+
+    # ---------------------------------------------------------- 1. claim the key
+    with pool().connection() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(_SELECT_SEND, (idempotency_key,))
+            existing = cur.fetchone()
+            if existing:
+                out = _reject_or_replay(cur, existing, idempotency_key=idempotency_key,
+                                        fp=fp, campaign_ref=campaign_ref,
+                                        recipient_count=recipient_count)
+                if not out:
+                    conn.commit()
+                    raise ProviderError(
+                        'idempotency key reused with a different request body',
+                        status=409, retryable=False)
+                rows = _deliveries(cur, existing['send_ref'])
+                conn.commit()
+                out['message_ids'] = [r['message_id'] for r in rows if r['message_id']]
+                out['recipients'] = [r['recipient'] for r in rows]
+                # The latencies of the ORIGINAL send, read back out of the store. The
+                # process that measured them may be dead; the numbers are not.
+                out['ses_latency_ms'] = [r['latency_ms'] for r in rows
+                                         if r['latency_ms'] is not None]
+                # THE NUMBER THE PROOF READS. Messages SES accepted DURING THIS CALL —
+                # zero, always, on a replay. Two dispatches, one MessageId.
+                out['ses_accepted'] = 0
+                if existing['status'] == 'reserved':
+                    out['warning'] = (
+                        'the original send was reserved and never confirmed; refusing to '
+                        're-send under this key. At most once, never twice.')
+                return out
+
+            ref = 'msg_' + uuid.uuid4().hex[:20]
+            cur.execute("""
+                INSERT INTO relay_send
+                    (send_ref, idempotency_key, request_fingerprint, campaign_ref,
+                     segment, recipient_count, status, channel)
+                VALUES (%s, %s, %s, %s, %s, %s, 'reserved', 'ses')
+            """, (ref, idempotency_key, fp, campaign_ref, segment, recipient_count))
+            # 202: the relay has ACCEPTED the request and claimed the key, and does not yet
+            # know what SES will say. One row per request, settled in step 3 rather than
+            # written twice — a request log that logs one request twice cannot be counted.
+            log_id = _log(cur, idempotency_key, fp, campaign_ref, len(fanout),
+                          'reserved', 202)
+        conn.commit()
+
+    # ------------------------------------------------------- 2. the irreversible act
+    accepted: list[dict] = []
+    subject = f'[AXIOM] {campaign_ref} · {segment}'
+    text = (f'AXIOM crash-safe execution demo.\n\n'
+            f'campaign        {campaign_ref}\n'
+            f'segment         {segment}\n'
+            f'idempotency key {idempotency_key}\n\n'
+            f'Amazon SES has no idempotency key. This message exists once because the key '
+            f'above was committed to a durable store before it was sent, and the second '
+            f'dispatch under that key never reached SES at all.\n')
+    try:
+        for addr in fanout:
+            a = ses.send_one(recipient=addr, subject=subject, body_text=text,
+                             campaign_ref=campaign_ref, idempotency_key=idempotency_key)
+            # Recorded IMMEDIATELY, in its own transaction. Any later failure therefore
+            # loses at most the message currently in flight.
+            with pool().connection() as conn:
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO relay_delivery
+                            (send_ref, campaign_ref, recipient, message_id, latency_ms,
+                             channel)
+                        VALUES (%s, %s, %s, %s, %s, 'ses')
+                    """, (ref, campaign_ref, a.recipient, a.message_id,
+                          int(a.latency_ms)))
+            accepted.append({'recipient': a.recipient, 'message_id': a.message_id,
+                             'latency_ms': round(a.latency_ms, 1)})
+    except ProviderError as e:
+        if not accepted and getattr(e, 'sent_uncertain', True) is False:
+            # Provably nothing was sent — SES named the refusal before accepting anything.
+            # Releasing the reservation is safe here and ONLY here, and it matters: a
+            # campaign whose key is burned by a rejected address can never be sent again
+            # under the receipt AXIOM already committed.
+            _release(idempotency_key, ref, log_id, fp, campaign_ref, str(e))
+        raise
+
+    # ------------------------------------------------------------ 3. mark it complete
+    with pool().connection() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute("UPDATE relay_send SET status = 'sent', last_seen_at = now() "
+                        'WHERE send_ref = %s', (ref,))
+            cur.execute("UPDATE relay_request_log SET verdict = 'created', "
+                        'http_status = 201 WHERE id = %s', (log_id,))
+        conn.commit()
+
+    return {'id': ref, 'campaign_ref': campaign_ref, 'segment': segment,
+            'recipient_count': recipient_count, 'status': 'sent',
+            'idempotent_replay': False, 'http_status': 201, 'replayed': False,
+            'channel': 'ses',
+            'recipients': [a['recipient'] for a in accepted],
+            'message_ids': [a['message_id'] for a in accepted],
+            'ses_accepted': len(accepted),
+            'ses_latency_ms': [a['latency_ms'] for a in accepted],
+            'ses_region': ses.region(),
+            'requested_recipients': len(recipients)}
+
+
+def _release(idempotency_key: str, send_ref: str, log_id: Any, fp: str,
+             campaign_ref: str, reason: str) -> None:
+    """Un-claim a key for a send that provably never happened. Never raises.
+
+    Deliberately narrow. This is the only path that deletes a reservation, it runs only
+    when zero messages were accepted AND the error was one SES raised before accepting
+    anything, and if it fails the key simply stays claimed — which is the safe direction.
+    """
+    try:
+        with pool().connection() as conn:
+            conn.autocommit = False
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM relay_send WHERE send_ref = %s AND '
+                            "status = 'reserved'", (send_ref,))
+                cur.execute("UPDATE relay_request_log SET verdict = 'rejected_upstream', "
+                            'http_status = 400 WHERE id = %s', (log_id,))
+            conn.commit()
+    except Exception:                                # noqa: BLE001 — see the docstring
+        pass
 
 
 # ------------------------------------------------------------------ audit / the demo

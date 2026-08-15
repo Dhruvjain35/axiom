@@ -29,11 +29,14 @@
       <span class="hx" data-k="provider"><i class="dot"></i>PROVIDER</span>
       <!-- The poll interval is on screen because it is a cost control. This demo lives
            inside Lambda's always-free 1M requests/month and one tab polling every second
-           would spend fifteen times that; the number here is how you can tell it isn't. -->
+           would spend fifteen times that; the number here is how you can tell it isn't.
+           On the AWS deployment every one of these requests also crosses API Gateway,
+           whose 1M/month allowance is a twelve-month offer the deploy account does not
+           have — so past Lambda's ceiling they are $1.00 per million, not free. -->
       <span class="hx" data-k="poll"
             title="Adaptive poll: 1s while work is in flight, backing off to 60s when nothing changes, and no timer at all while this tab is hidden."><i class="dot"></i>POLL<b id="poll-rate">—</b></span>
       <span class="reqs" id="req-count"
-            title="/api requests this tab has made. Lambda's always-free tier is 1,000,000 requests per month.">0 REQ</span>
+            title="/api requests this tab has made. Lambda's always-free tier is 1,000,000 requests per month; on AWS these also cross API Gateway, which is billed on this account at $1.00 per million.">0 REQ</span>
       <span class="hver" id="hver">—</span>
     </div>
 

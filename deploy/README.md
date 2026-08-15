@@ -1,11 +1,20 @@
 # deploy/ — getting AXIOM onto AWS
 
+**What is actually deployed is `deploy/lambda/`, not this.** The ECS path below was written
+first and never applied — no cluster, service or task definition exists — and Bedrock turned
+out to be unusable on the deployment account (on-demand quota 0.0 req/min, not adjustable).
+The live demo is two Lambda functions behind an HTTP API, with an EventBridge sweep and five
+CloudWatch alarms keeping it alive through judging: see
+[`lambda/README.md`](lambda/README.md). This directory remains the production-shaped story
+and is priced out honestly in [`COST.md`](COST.md); every hour-billed line in it is a reason
+it stayed unapplied.
+
 Two paths, and they are not alternatives to each other.
 
 | Path | What it proves | Time |
 | --- | --- | --- |
 | `docker compose up --build` from the repo root | the whole system works, reproducibly, on any machine with Docker and no cloud account at all | 18 s |
-| `./scripts/provision_ccloud.sh` then `./scripts/deploy.sh` | the submission's requirement: CockroachDB Cloud + ECS Fargate + Bedrock, with a demo URL that survives to Sep 15 | ~15 min |
+| `./scripts/provision_ccloud.sh` then `./scripts/deploy.sh` | the production shape: CockroachDB Cloud + ECS Fargate. **Never applied** — the demo URL that survives to Sep 15 is the Lambda one. | ~15 min |
 
 Do the first one before the second. If compose does not come up green, the
 deployment will not either, and finding that out locally costs nothing.

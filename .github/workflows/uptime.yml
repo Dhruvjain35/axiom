@@ -74,11 +74,21 @@ permissions:
   issues: write
 
 env:
-  # The single place the target lives. To exercise the alerting end to end: point this at
-  # something that returns 200 and is not AXIOM (https://example.com does it — every check
-  # fails), dispatch from the Actions tab, confirm the issue opens, then revert and
-  # dispatch again to confirm it closes itself.
-  BASE: https://axiom-one-sage.vercel.app
+  # EVERY submitted URL, space-separated. There are two — the Vercel deployment and the
+  # AWS one behind API Gateway — and a monitor that watches one of them is worse than
+  # useless, because a green badge on the Vercel URL is exactly what would stop anyone
+  # looking at the AWS one. Both are given to judges, so both have to be watched.
+  #
+  # One job checks both rather than a matrix of two jobs, deliberately: the alerting below
+  # opens and closes a single deduplicated issue, and two jobs would race each other to
+  # create it, to close it, and to contradict each other about the current state.
+  #
+  # To exercise the alerting end to end: add something that returns 200 and is not AXIOM
+  # (https://example.com does it — every check fails), dispatch from the Actions tab,
+  # confirm the issue opens, then revert and dispatch again to confirm it closes itself.
+  BASES: >-
+    https://axiom-one-sage.vercel.app
+    https://nq0i2ob395.execute-api.us-east-2.amazonaws.com
   ISSUE_LABEL: uptime
   ISSUE_TITLE: 'AXIOM demo is not usable'
 
@@ -108,8 +118,17 @@ jobs:
         run: |
           set +e
           set -o pipefail
-          bash scripts/uptime_check.sh "$BASE" 2>&1 | tee /tmp/uptime.raw
-          code=$?
+          : > /tmp/uptime.raw
+          code=0
+          # Every URL is checked even after one fails. Stopping at the first failure would
+          # report "Vercel is down" and say nothing about whether AWS is also down, which
+          # is the more useful fact when deciding whether the cause is the demo or the
+          # database underneath both of them.
+          for u in $BASES; do
+            bash scripts/uptime_check.sh "$u" 2>&1 | tee -a /tmp/uptime.raw
+            rc=$?
+            [ "$rc" -ne 0 ] && code=$rc
+          done
           echo "code=$code" >> "$GITHUB_OUTPUT"
 
           # The script marks a failed check by coloring it red and by nothing else, so the
@@ -171,7 +190,7 @@ jobs:
           {
             printf 'The live demo failed its usability check.\n\n'
             printf '| | |\n|---|---|\n'
-            printf '| checked | `%s` |\n' "$BASE"
+            printf '| checked | `%s` |\n' "$BASES"
             printf '| at | %s |\n' "$NOW"
             printf '| failing | **%s** |\n' "$SIG"
             printf '| run | %s |\n\n' "$RUN_URL"
@@ -189,7 +208,7 @@ jobs:
             printf '4. **vector index not chosen** — recall silently degraded to a full scan. It returns\n'
             printf '   correct rows on demo-sized data, so nothing else on earth would catch it.\n'
             printf '   `python scripts/preflight.py` against production.\n\n'
-            printf 'Reproduce locally with `./scripts/uptime_check.sh %s`.\n\n' "$BASE"
+            printf 'Reproduce locally with `./scripts/uptime_check.sh <url>` for each of: %s\n\n' "$BASES"
             printf 'This issue is managed by `.github/workflows/uptime.yml`. It is refreshed in place\n'
             printf 'rather than duplicated, and it closes itself when a later run passes — so an open\n'
             printf 'issue always means currently broken.\n\n'

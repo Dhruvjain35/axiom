@@ -43,18 +43,27 @@
 #
 # What it costs
 # -------------
-# HTTP APIs are $1.00 per million requests after a free allowance of **1 million
-# requests per month for 12 months** from the account's first API Gateway request.
-# That allowance is a 12-month offer rather than an always-free one, which is why
-# deploy.sh preferred a Function URL — but the account is days old, the offer runs
-# well past the Sep 15 judging deadline, and judging traffic is a handful of humans.
-# Nothing here bills at rest: an HTTP API with no traffic costs $0.00.
+# CORRECTED 2026-08-14. This block said the 1M-requests-per-month allowance "runs well
+# past the Sep 15 judging deadline" and concluded $0.00. It does not run at all here.
+# The allowance is a TWELVE-MONTH offer, and this account has no twelve-month tier to
+# spend:
 #
-# Throttling is the guard on the only variable in that sentence. 20 requests/second
-# with a burst of 40 is far above what Mission Control's polling needs and far below
-# what a crawler would need to reach a million requests in a month (that is 0.38
-# req/s sustained, so the cap is ~50x headroom over the free allowance and the account
-# would hit the Lambda concurrency limit of 10 long before the bill).
+#   aws freetier get-account-plan-state  -> accountPlanType "PAID", $0.00 credits
+#   aws freetier get-free-tier-usage     -> 12 entries, ALL "Always Free",
+#                                           ZERO "12 Months Free"
+#
+# So HTTP API requests are billed at **$1.00 per million from the first request**. At
+# judging volume — a handful of humans over four weeks — that is cents, and the measured
+# month-to-date across every service in the account is $0.0001021066. Nothing here bills
+# at rest: API Gateway is per-request, so an HTTP API with no traffic still costs nothing.
+# Cents stated plainly beats zero asserted, which is the whole posture of this repo.
+#
+# Throttling is the guard on the only variable in that sentence, and it matters more now
+# that there is no free million underneath it. 20 requests/second with a burst of 40 is
+# far above what Mission Control's polling needs and far below what a crawler would need
+# to reach a million requests in a month (that is 0.38 req/s sustained, so the cap is
+# ~50x headroom over the point where the bill reaches one dollar, and the account would
+# hit the Lambda concurrency limit of 10 long before that).
 #
 # What this script makes publicly reachable
 # -----------------------------------------
@@ -309,9 +318,10 @@ echo "  docs:        $ENDPOINT/api/docs"
 echo "  logs:        aws logs tail /aws/lambda/$API_FN --follow --region $REGION"
 echo "  throttle:    ${THROTTLE_RATE} req/s, burst ${THROTTLE_BURST}, on the \$default stage"
 echo
-echo "  Standing cost: \$0.00/month. An HTTP API with no traffic bills nothing, Lambda's"
-echo "  1M requests and 400,000 GB-seconds/month are always-free, and API Gateway's first"
-echo "  1M HTTP API requests/month are free for 12 months from this account's first"
-echo "  request — which is longer than this demo has to live."
+echo "  Standing cost: nothing bills at rest — an HTTP API with no traffic costs nothing,"
+echo "  and Lambda's 1M requests + 400,000 GB-seconds/month are always-free on this account."
+echo "  But this is NOT \$0.00/month: API Gateway's 1M free requests is a 12-MONTH offer and"
+echo "  this PAID account has none, so requests bill at \$1.00/million from the first one."
+echo "  Measured month-to-date, all services: \$0.0001021066. Through Sep 15: under \$1.00."
 echo
 echo "  Tear down:   ./deploy/lambda/apigateway.sh --destroy"

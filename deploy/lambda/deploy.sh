@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# AXIOM :: deploy the demo to AWS Lambda for $0.00/month. Idempotent — re-run freely.
+# AXIOM :: deploy the demo to AWS Lambda for cents a month. Idempotent — re-run freely.
+#
+# This line said "$0.00/month" until 2026-08-14. It was true of Lambda and CloudWatch, which
+# ARE always-free on this account, and it stopped being true once API Gateway and X-Ray went
+# in: their free tiers are TWELVE-MONTH offers, and `aws freetier get-free-tier-usage`
+# returns twelve entries here, all "Always Free" and not one "12 Months Free". Measured
+# month-to-date across every service: $0.0001021066. Projected through Sep 15 judging:
+# under $1.00, guarded by the axiom-zero-spend budget alerting at one cent.
 #
 #   export AWS_PROFILE=axiom
 #   export DATABASE_URL='postgresql://axiom_app:...@...cockroachlabs.cloud:26257/axiom?sslmode=verify-full&connect_timeout=5'
@@ -7,18 +14,31 @@
 #
 # Creates or updates these, none of which bills at rest:
 #
-#   IAM role          axiom-lambda-role   logs + invoke-the-worker, nothing else
+#   IAM role          axiom-lambda-role   logs + invoke-the-worker + X-Ray, nothing else
 #   Lambda            axiom-api           the FastAPI app and the Mission Control UI
 #   Lambda            axiom-worker        the queue-draining worker, invoked async
 #   Function URL      on axiom-api        CORS open; its auth type is DECIDED BY PROBE,
 #                                         see "the public front" below
-#   CloudFront        only if the public function URL is refused — always-free tier
+#   CloudFront        only if the public function URL is refused — serves no traffic today
 #   Log groups        /aws/lambda/axiom-* 7-day retention so nothing accretes
+#   X-Ray tracing     Active on the       the crash window as a clickable timeline. The
+#                     WORKER only         API stays PassThrough on purpose — a polling tab
+#                                         would mint a trace per request, and X-Ray is
+#                                         BILLED on this account at $5.00/million.
+#                                         See the arithmetic at API_TRACING_MODE below.
+#
+# The public front door and the four-week keepalive are NOT created here:
+#   apigateway.sh      the HTTP API that actually works on this account
+#   observability.sh   the 5-minute sweep, 5 CloudWatch alarms, SNS, dashboard
 #
 # What it deliberately does NOT create, and why
 # ---------------------------------------------
-#   API Gateway    $1.00 per million requests. A Function URL is free and does the same
-#                  job for a single-origin demo.
+#   API Gateway    $1.00 per million requests, and NOT free here — its 1M/month allowance
+#                  is a twelve-month offer this account does not have. A Function URL is
+#                  free and does the same job for a single-origin demo. That reasoning was
+#                  right about the cost and wrong about this account, which refuses
+#                  anonymous Function URLs outright: apigateway.sh creates the HTTP API
+#                  anyway, deliberately, and the demo URL is served through it.
 #   ALB            ~$16.40/month whether or not a judge ever loads the page.
 #   ECR            its 500 MB is a 12-month offer, not always-free — and a ZIP under
 #                  50 MB needs no registry at all.
@@ -33,7 +53,10 @@
 #
 # Lambda's 1M requests + 400,000 GB-seconds per month is an ALWAYS-free allowance, not a
 # 12-month introductory one, which is the entire reason this path exists: the demo has to
-# stay up from Aug 19 to Sep 15 on an account with $0.00 of credits.
+# stay up from Aug 19 to Sep 15 on an account with $0.00 of credits. That is confirmed
+# against the account itself, not a pricing page — Lambda, CloudWatch, SNS, SQS, KMS, Glue
+# and SES are among the twelve "Always Free" entries get-free-tier-usage returns here.
+# API Gateway, X-Ray and Comprehend are not, and are billed.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,6 +94,49 @@ else
 fi
 
 LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-7}"
+
+# X-Ray. Set here rather than clicked in the console, because the claim this
+# instrumentation supports — "the crash window is visible as a timeline" — is worth
+# nothing if the next deploy silently reverts it.
+#
+# Active means Lambda decides to sample the invocation itself; PassThrough means it only
+# honours an upstream decision, and nothing upstream ever makes one here (an API Gateway
+# HTTP API cannot start a trace, and the worker is invoked asynchronously). So
+# PassThrough is, on these two functions, a tracing config that produces no traces at all.
+#
+# The two functions get DIFFERENT answers, and the reason is arithmetic rather than taste.
+#
+# CORRECTION, 2026-08-14: this block used to subtract a free grant of 100,000 traces/month
+# before pricing anything. There is no such grant on this account. X-Ray's 100,000 traces
+# is a TWELVE-MONTH offer, and `aws freetier get-free-tier-usage` returns twelve entries
+# here, every one "Always Free" and not one "12 Months Free". So traces are $5.00 per
+# million from the FIRST one. The arithmetic below is redone without the subtraction, and
+# it did not change the decision — it strengthened it.
+#
+#   axiom-worker -> Active. A worker invocation happens only when a human presses RUN
+#     MISSION, and the API refuses a fourth concurrent worker. One click, one invocation,
+#     one trace. 5,000 clicks across the whole judging window is 5,000 traces = $0.025.
+#     This is also the function that HAS the argument in it: PREPARE, dispatch, SETTLE and
+#     RECOVER all execute here, each one wrapped in its own subsegment and annotated with
+#     the task id, the crash window and whether the provider reported an idempotent replay
+#     — so a judge filters the console for a replayed recovery rather than scrolling for it.
+#
+#   axiom-api -> PassThrough. Mission Control polls, and web/app.js documents its own
+#     worst case: an abandoned tab settles to 8 requests a minute.
+#         8 x 60 x 24 x 30                     = 345,600 requests/month
+#         0.133 req/s, under Lambda's 1 req/s sampling reservoir -> ~100% sampled
+#         345,600 traces x $5.00/million       = $1.73/month PER TAB, none of it free
+#     ONE forgotten tab is over the $1.00 axiom-zero-spend budget on X-Ray alone; three
+#     across the Aug 19 - Sep 15 judging window is $5.18. A demo suspended for a billing
+#     surprise proves nothing, and the API's contribution to the trace — an HTTP timeline
+#     and the pool-revalidation subsegment — is polish, not the argument.
+#
+# Both are knobs, not decisions baked in: `API_TRACING_MODE=Active ./deploy/lambda/deploy.sh`
+# turns the API on for the length of a recorded demo, and turning it back off is the same
+# command with the default. Note that AXIOM_XRAY=0 is NOT the cost lever — it silences
+# our subsegments while Lambda still records (and bills) the trace. The mode is the lever.
+API_TRACING_MODE="${API_TRACING_MODE:-PassThrough}"
+WORKER_TRACING_MODE="${WORKER_TRACING_MODE:-Active}"
 
 : "${DATABASE_URL:?set DATABASE_URL to the CockroachDB Cloud connection string (with sslmode=verify-full, no sslrootcert — the cert ships in the ZIP)}"
 [ -f "$ZIP" ] || { echo "no $ZIP — run ./deploy/lambda/build.sh first" >&2; exit 1; }
@@ -112,6 +178,20 @@ fi
 aws iam attach-role-policy --role-name "$ROLE_NAME" \
   --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 echo "  attached: AWSLambdaBasicExecutionRole (CloudWatch Logs)"
+
+# X-Ray. Exactly xray:PutTraceSegments + xray:PutTelemetryRecords — the daemon inside the
+# execution environment uses the function's role to file what our subsegments hand it, so
+# without this the tracing config is Active and every trace is empty. Both actions are
+# unresourceable (the API takes no ARN), which is why the managed policy is a wildcard and
+# why writing our own would be the same wildcard with more lines.
+#
+# Granted to BOTH functions even though only the worker traces today, because the role is
+# shared and a permission the API cannot use costs nothing — whereas flipping
+# API_TRACING_MODE=Active for a recorded demo and getting empty traces because the role
+# was scoped tighter than the config would waste an afternoon.
+aws iam attach-role-policy --role-name "$ROLE_NAME" \
+  --policy-arn arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+echo "  attached: AWSXRayDaemonWriteAccess (PutTraceSegments, PutTelemetryRecords)"
 
 # The one extra permission, scoped to one function ARN: POST /api/demo/run-worker
 # invokes the worker asynchronously rather than forking a subprocess, because a
@@ -166,7 +246,7 @@ UPLOAD_OPTS=(--cli-read-timeout 0 --cli-connect-timeout 60)
 export AWS_MAX_ATTEMPTS="${AWS_MAX_ATTEMPTS:-6}"
 
 deploy_fn() {
-  local name="$1" handler="$2" memory="$3" timeout="$4"
+  local name="$1" handler="$2" memory="$3" timeout="$4" tracing="$5"
   say "function $name ($handler)"
 
   if aws lambda get-function --function-name "$name" >/dev/null 2>&1; then
@@ -188,10 +268,11 @@ deploy_fn() {
     aws lambda update-function-configuration --function-name "$name" \
       --role "$ROLE_ARN" --handler "$handler" --runtime "$RUNTIME" \
       --memory-size "$memory" --timeout "$timeout" \
+      --tracing-config "Mode=$tracing" \
       --environment "file://$TMPDIR_RUN/env.json" \
       --output text --query 'to_string(MemorySize)' >/dev/null
     aws lambda wait function-updated-v2 --function-name "$name"
-    echo "  config updated: ${memory} MB / ${timeout}s / $RUNTIME / $ARCHS"
+    echo "  config updated: ${memory} MB / ${timeout}s / $RUNTIME / $ARCHS / X-Ray $tracing"
   else
     # IAM is eventually consistent: a role created seconds ago is frequently not yet
     # assumable, and Lambda reports that as "The role defined for the function cannot be
@@ -202,6 +283,7 @@ deploy_fn() {
         --runtime "$RUNTIME" --architectures "$ARCHS" --role "$ROLE_ARN" \
         --handler "$handler" --zip-file "fileb://$ZIP" \
         --memory-size "$memory" --timeout "$timeout" \
+        --tracing-config "Mode=$tracing" \
         --environment "file://$TMPDIR_RUN/env.json" \
         --description "AXIOM $name — crash-safe agent execution on CockroachDB" \
         --output text --query 'to_string(CodeSize)' >/dev/null 2>&1; do
@@ -210,12 +292,13 @@ deploy_fn() {
         aws lambda create-function --function-name "$name" --runtime "$RUNTIME" \
           --architectures "$ARCHS" --role "$ROLE_ARN" --handler "$handler" \
           --zip-file "fileb://$ZIP" --memory-size "$memory" --timeout "$timeout" \
+          --tracing-config "Mode=$tracing" \
           --environment "file://$TMPDIR_RUN/env.json" >&2; exit 1; }
       echo "  waiting for the role to become assumable (${tries}/12)"
       sleep 5
     done
     aws lambda wait function-active-v2 --function-name "$name"
-    echo "  created: ${memory} MB / ${timeout}s / $RUNTIME / $ARCHS"
+    echo "  created: ${memory} MB / ${timeout}s / $RUNTIME / $ARCHS / X-Ray $tracing"
   fi
 
   # Logs are the only thing here that can grow without bound. 7 days is longer than the
@@ -226,13 +309,13 @@ deploy_fn() {
   echo "  logs: /aws/lambda/$name (${LOG_RETENTION_DAYS}d retention)"
 }
 
-deploy_fn "$API_FN" handler_api.lambda_handler "$API_MEMORY" "$API_TIMEOUT"
+deploy_fn "$API_FN" handler_api.lambda_handler "$API_MEMORY" "$API_TIMEOUT" "$API_TRACING_MODE"
 # The worker ships in the SAME ZIP with a different entry point: one artifact, one
 # upload, two functions, and no chance of the API and the worker disagreeing about what
 # axiom.tasks does. Its handler is built in parallel — if handler_worker.py was missing
 # when build.sh ran, this function exists but cannot import, which is visible instantly
 # in its log group and fixed by re-running build.sh and this script.
-deploy_fn "$WORKER_FN" "$WORKER_HANDLER" "$WORKER_MEMORY" "$WORKER_TIMEOUT"
+deploy_fn "$WORKER_FN" "$WORKER_HANDLER" "$WORKER_MEMORY" "$WORKER_TIMEOUT" "$WORKER_TRACING_MODE"
 
 # ------------------------------------------------------------------------ Function URL
 # Every deployment gets a Function URL — it is free, and it is the origin CloudFront uses
@@ -256,8 +339,10 @@ ORIGIN_HOST="${URL#https://}"
 #
 #   A. Function URL, auth NONE. No extra service, no extra hop, $0.
 #   B. CloudFront -> Function URL (auth AWS_IAM, signed by an Origin Access Control).
-#      CloudFront's free tier is ALWAYS free — 1 TB out, 10M requests, free TLS cert,
-#      per month, permanently — so this is also $0. It is simply more moving parts.
+#      CloudFront's PUBLISHED free tier is always free — 1 TB out, 10M requests, free TLS
+#      cert, per month. It is NOT among the twelve free-tier entries this account actually
+#      has, so do not bank on that here; at demo transfer volume it is fractions of a cent
+#      either way. It is simply more moving parts.
 #   C. Function URL, auth AWS_IAM, reached with a SigV4 signature. Not a public demo,
 #      but it proves the deployment and it is what `signed_curl.py` speaks.
 #
@@ -497,9 +582,16 @@ echo "               $DEMO_URL/api/mission"
 echo "               $DEMO_URL/api/crash-windows"
 echo "  docs:        $DEMO_URL/api/docs"
 echo "  logs:        aws logs tail /aws/lambda/$API_FN --follow --region $REGION"
+echo "  traces:      https://${REGION}.console.aws.amazon.com/cloudwatch/home?region=${REGION}#xray:traces/query"
+echo "               filter: annotation.crash_window = \"W4\"   the traces this project is about"
+echo "                       annotation.idempotency_key = \"...\"  the crash and its recovery, together"
 echo "  origin:      $URL/  (auth $(aws lambda get-function-url-config \
                                      --function-name "$API_FN" --query AuthType --output text))"
 echo
-echo "  Standing cost: \$0.00/month. Lambda's 1M requests and 400,000 GB-seconds per month"
-echo "  are always-free (not a 12-month offer), the Function URL is free, CloudFront's"
-echo "  1 TB + 10M requests per month are always-free, and nothing here bills at rest."
+echo "  Standing cost: nothing here bills at rest, and it is NOT \$0.00. Lambda's 1M requests"
+echo "  and 400,000 GB-seconds per month are always-free on this account (verified, not a"
+echo "  12-month offer) and the Function URL is free — but X-Ray is BILLED here at \$5.00 per"
+echo "  million traces, and the public front door apigateway.sh creates is BILLED at \$1.00"
+echo "  per million requests: both of their free tiers are 12-month offers this PAID account"
+echo "  does not have. Measured month-to-date, all services: \$0.0001021066. Projected"
+echo "  through Sep 15: under \$1.00, with the axiom-zero-spend budget emailing at one cent."

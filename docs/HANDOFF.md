@@ -7,8 +7,12 @@
 > blocking preflight gates, and the core claim verified on a real distributed cluster.
 > **Two public URLs are live** — Vercel and AWS API Gateway — and the AWS Function-URL
 > block that §15 treats as the one open item is SOLVED (§16). CockroachDB tools read
-> **3/4 in use** with the fourth submitted upstream as an open PR; AWS reads **2/5**.
-> What remains: **the Devpost form and the video upload** (§16.6).
+> **3/4 in use** with the fourth submitted upstream as an open PR; AWS reads **6/11** —
+> Lambda, API Gateway, EventBridge Scheduler, CloudWatch, SNS, X-Ray (§16.7). Cost is
+> **cents, not $0.00**: this account is PAID with no twelve-month free tier, so API
+> Gateway, X-Ray and Comprehend bill (§16.7).
+> What remains: **the Devpost form, the video upload** (§16.6) **and one click on the SNS
+> confirmation email**, without which five CloudWatch alarms fire into a void (§16.7).
 >
 > ⚠ **§§1-15 are a dated record and several of their conclusions have been overturned.**
 > Read §16 first — it is the current state, and it names what it supersedes.
@@ -1210,12 +1214,14 @@ public URLs         https://axiom-one-sage.vercel.app          (Vercel, primary)
                     https://nq0i2ob395.execute-api.us-east-2.amazonaws.com  (AWS)
                     both pass scripts/uptime_check.sh 6/6
 CockroachDB tools   3/4 in use · 4th submitted upstream, PR open (16.2)
-AWS services        2/5 in use — Lambda, API Gateway (16.3)
+AWS services        6/11 in use — Lambda, API Gateway, EventBridge Scheduler,
+                    CloudWatch, SNS, X-Ray (16.3, 16.7)
 Stripe              real sandbox refund, PUBLIC receipt a judge can open without an
                     account: /stripe-receipt redirects to Stripe's own page
 film                out/axiom-v3.mp4 in ~/axiom-video — 2:56.82, under the 3:00 ceiling
 repo                https://github.com/Dhruvjain35/axiom — public, 22 commits
-cost to date        $0.00
+cost to date        $0.0001021066 month-to-date, all services (16.7)
+                    NOT $0.00 — this line said $0.00 until 2026-08-14
 ```
 
 ### 16.2 CockroachDB is 3/4, not 4/4
@@ -1240,7 +1246,9 @@ front end — that is what this account withholds. API Gateway needs `lambda:Inv
 for the *named* service principal `apigateway.amazonaws.com`, evaluated by the Lambda
 control plane, and it is honored. Both doors are live on the same function right now:
 Function URL 403, HTTP API 200, same function, same moment. `deploy/lambda/apigateway.sh`
-rebuilds it; `--destroy` tears it down. $0.00/month.
+rebuilds it; `--destroy` tears it down. **This line said `$0.00/month` — see 16.7: API
+Gateway is billed on this account at $1.00/M requests, because its free tier is a
+twelve-month offer and this account has none. It is cents, and nothing bills at rest.**
 
 **Bedrock cannot be used on this account, and the earlier reason given was wrong.** §15
 says "no model is enabled". Models *are* enabled and both answer. The blocker is quota:
@@ -1293,3 +1301,108 @@ if the embedder ever changes, and preflight gate 17 reports the spaces present.
 4. **Rotate every credential after Sep 15**: the AWS deploy key, the `axiom-bedrock` IAM
    user created this session, the CockroachDB service-account key, the ElevenLabs key, and
    the Stripe test key.
+
+### 16.7 The free-tier correction, six AWS services, and the cost guard — 2026-08-14
+
+**The repository said `$0.00/month` in eleven places and it was wrong.** Not wrong when it
+was written — wrong now, and the difference matters, because the entire thesis of this
+project is that it *measures* rather than asserts. A stale zero is a substantive defect in
+that argument, not a typo. So the account was read instead of assumed:
+
+```
+aws freetier get-account-plan-state
+  -> accountPlanType "PAID", accountPlanRemainingCredits $0.00
+
+aws freetier get-free-tier-usage --query 'freeTierUsages[].freeTierType'
+  -> 12 entries. Every one "Always Free". ZERO "12 Months Free".
+```
+
+The consequence is one sentence: **every AWS free tier that is a twelve-month offer is not
+available on this account at all.** Not expiring in 2027 — not available.
+
+```
+ALWAYS FREE here   Lambda · CloudWatch · SNS · SQS · KMS · Glue · SES
+BILLED here        API Gateway · X-Ray · Comprehend
+                   (all three of their free tiers are twelve-month offers)
+
+month-to-date, all services   $0.0001021066   (measured 2026-08-14)
+projection through Sep 15     under $1.00
+guard                         AWS Budget axiom-zero-spend, $1.00,
+                              alerts at 1% / 50% / 100% -> email at ONE CENT
+```
+
+Where a claim was true when written, the files now say so rather than quietly editing it —
+`deploy/lambda/COST.md`, `deploy/lambda/README.md`, `apigateway.sh` and `deploy.sh` each
+carry the old sentence and the correction beside it. Cents honestly stated is a stronger
+position than zero asserted, and it is the position this repo can actually defend.
+
+**Two claims that were quietly load-bearing and are now fixed:**
+
+1. `deploy.sh` priced X-Ray by subtracting a free grant of 100,000 traces/month before
+   charging anything. There is no such grant here. Redone without it, a forgotten Mission
+   Control tab is **$1.73/month in X-Ray alone** — over the $1.00 budget on its own. It did
+   not change the decision to keep `axiom-api` on `PassThrough`; it strengthened it.
+2. `COST.md` §2 said "**Do not** put the worker on a schedule — an EventBridge rule is the
+   single easiest way to turn this deployment into a bill." There is now a schedule. The
+   warning was about a *per-minute* one (43,200 invocations, $11.95–$80.99/month) and it
+   still stands. The sweep is 8,640 invocations at a measured 2,387 ms billed = ~10,300
+   GB-s = **2.6% of Lambda's always-free 400,000**. Two orders of magnitude apart, and the
+   section now argues that rather than asserting a rule it violates.
+
+**AWS coverage is 6 of 11, up from 2 of 5.** The count is the number of `in_use: true`
+entries in `axiom/measurements.json`, which is the only authority — `web/app.js`'s
+`inUse()` reads the boolean rather than grepping the status prose, and its build-copy
+literal was re-synced to match the file row for row (verified programmatically, exact
+match).
+
+```
+IN USE (6)      Lambda · API Gateway · EventBridge Scheduler · CloudWatch · SNS · X-Ray
+NOT IN USE (5)  Bedrock (quota 0, unadjustable) · CloudFront (serves no traffic)
+                ECS/ALB/S3 (never applied) · SES (verified, not yet dispatching)
+                Comprehend (wired, OFF by default)
+```
+
+SES is the instructive one. Its sender identity is verified and a real send is confirmed
+against Amazon's mailbox simulator, and it is **still `false`**, because nothing dispatches
+through it yet. That is the same rule that keeps Bedrock out, applied to a service where
+counting it would have been easy and would have made the headline 7 of 11.
+
+**What the observability stack actually is**, documented now wherever the deployment is
+described (README, JUDGING, SUBMISSION, `deploy/lambda/README.md`):
+
+- **A 5-minute EventBridge Scheduler sweep** (`axiom-worker-sweep`, target `axiom-worker`,
+  `{"mode":"drain","seconds":45,"idle_exit":true}`) keeps the queue draining so the board
+  does not die during four unattended weeks. `mode=drain`, **not** chaos — a background
+  process that killed itself on a timer would make the error alarm meaningless.
+- **Five CloudWatch alarms paging over SNS**: `axiom-api-errors`, `axiom-api-throttles`,
+  `axiom-http-5xx`, `axiom-worker-errors`, `axiom-worker-silent`, plus a dashboard.
+  Thresholds are loose on purpose because the demo crashes its worker *by design* at W4.
+- **X-Ray traces the crash-and-recovery path**, with subsegments on **PREPARE, dispatch,
+  SETTLE and the recovery recall**, annotated so a judge can filter for a replayed recovery
+  rather than scroll for one.
+
+**⚠ THE ONE THING LEFT, AND IT IS A MOUSE CLICK.** The SNS email subscription is still
+`PendingConfirmation`. Until a human clicks the confirmation link AWS mailed, all five
+alarms enter ALARM correctly and the notification goes **nowhere** — so the alerting path
+is *not proven end to end for the current subscription*, and a break during Aug 19 – Sep 15
+is still silent. Re-running `observability.sh` replaces a confirmed subscription with a
+pending one, which is a defect in that script rather than in SNS and which silently disarms
+alerting. Read the state without changing it:
+
+```bash
+./deploy/lambda/observability.sh --status
+```
+
+**Two inconsistencies found and deliberately NOT resolved here**, because resolving either
+one means changing behaviour or re-measuring, and this pass was documentation only:
+
+- `measurements.json` records X-Ray as *"Active tracing on axiom-api and axiom-worker"*,
+  while `deploy.sh` defaults `API_TRACING_MODE=PassThrough` and argues at length for it.
+  Both cannot describe the same deployment. Read the live config
+  (`aws lambda get-function-configuration --function-name axiom-api --query TracingConfig`)
+  and correct whichever is stale — and note the cost consequence above if the API really is
+  `Active`.
+- The Agent Skills row reads *"PR not opened"* in `README.md`, `docs/SUBMISSION.md` and
+  `web/app.js`'s build copy, while `measurements.json` records the PR as **submitted**
+  (cockroachlabs/cockroachdb-skills#23). `in_use` is `false` either way so no count moves,
+  but three files describe the world as it was before §16.2.

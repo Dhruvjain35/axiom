@@ -38,6 +38,17 @@ becomes a hard cap on the total blast radius of an entire mission. Both work. Bo
 stored in columns named for money — see the note in axiom/domains/__init__.py, which
 does not pretend otherwise.
 
+THE PROVIDER THAT OFFERS NOTHING
+--------------------------------
+With AXIOM_SES=1 and an explicit recipient list on the payload, this domain stops
+simulating and sends real email through Amazon SES (axiom/ses.py, dispatched by
+axiom/domains/relay.py). That is the sharpest version of this project's argument and the
+reason the second worked example is worth building rather than checking off. Stripe has
+idempotency keys, so the refund example argues that AXIOM makes the key survive the crash.
+SES has NO idempotent send — call SendEmail twice and two emails arrive, each with its own
+MessageId, and there is no header to hand it and no replay flag to read back. So on this
+path there is no shared credit: the entire guarantee is AXIOM's, or it does not exist.
+
 WHAT THE ENGINE DID NOT NEED TO CHANGE
 --------------------------------------
 Nothing. Not one line of tasks.py, memory.py, policy.py or db.py. The idempotency key is
@@ -243,12 +254,22 @@ class BroadcastDomain:
         # with one word changed is rejected by the relay with a 409 instead of quietly
         # sending different copy under a key that promised the original. That is crash
         # window W7 with the stakes a marketing team would actually recognize.
-        return {'campaign_ref': self.subject_ref(payload),
+        body = {'campaign_ref': self.subject_ref(payload),
                 'segment': payload.get('segment', 'all'),
                 'recipient_count': intent.risk_units,
                 'template_sha': hashlib.sha256(
                     self.describe(payload).encode()).hexdigest()[:16],
                 'reason': intent.kind}
+        # An explicit address list is the real-gateway shape, and it belongs IN the body
+        # rather than beside it. Two consequences, both wanted: the list is covered by
+        # request_fingerprint, so a recovered agent that re-synthesizes the campaign with
+        # one address changed is a 409 rather than a surprise inbox; and the receipt
+        # re-sends it verbatim, so recovery cannot mail a list the policy never saw.
+        # Absent for the count-only campaigns, which keeps their fingerprints byte-for-byte
+        # what they have always been.
+        if payload.get('recipients'):
+            body['recipients'] = [str(a) for a in payload['recipients']]
+        return body
 
     def dispatch(self, *, idempotency_key: str, request_body: dict, risk_units: int,
                  chaos_pre: float | None = None,
@@ -259,6 +280,11 @@ class BroadcastDomain:
             segment=request_body.get('segment', 'all'),
             recipient_count=risk_units,
             request_body=request_body,
+            # None on every existing path. With AXIOM_SES=1 and a list present these
+            # addresses receive real email through Amazon SES, and the relay's own store
+            # is the only thing preventing a second copy — SES has no idempotency key to
+            # be handed. See axiom/ses.py.
+            recipients=request_body.get('recipients'),
             chaos_pre=chaos_pre, chaos_post=chaos_post)
         return Effect(ref=r['id'], status=r['http_status'], body=r,
                       replayed=r['replayed'])
@@ -266,12 +292,21 @@ class BroadcastDomain:
     def settled_memory(self, *, situation: str, idempotency_key: str, risk_units: int,
                        effect: Effect, first_try: bool) -> str:
         verb = 'REPLAYED' if effect.replayed else 'DELIVERED'
-        return (
+        text = (
             f'{situation} | recovered={not first_try} | relay {verb} {effect.ref} to '
             f'{risk_units} recipients under key {idempotency_key}'
             if not first_try else
             f'{situation} | campaign {effect.ref} delivered to {risk_units} recipients '
             f'on the first attempt')
+        # On the real path the memory sentence carries the EVIDENCE rather than a claim:
+        # SES MessageIds, and how many messages this particular call caused SES to accept
+        # (zero, on a replay). Appended only when the send actually went through SES, so
+        # every existing memory row is byte-for-byte what it has always been.
+        if effect.body.get('channel') == 'ses':
+            ids = ', '.join(effect.body.get('message_ids') or []) or 'none recorded'
+            text += (f' | SES accepted {effect.body.get("ses_accepted", 0)} message(s) on '
+                     f'this call; MessageIds {ids}')
+        return text
 
     # ---------------------------------------------------------------- the audit
 

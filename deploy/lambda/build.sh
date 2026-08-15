@@ -24,8 +24,10 @@
 # 2. **The ZIP must stay under 50 MB.** That is the hard limit for
 #    `aws lambda update-function-code --zip-file fileb://...`; above it AWS requires the
 #    object to come from S3, and S3's free tier is a 12-month offer rather than an
-#    always-free one. Staying under the line is what keeps this deployment at $0, so the
-#    size is printed against the limit on every build instead of being assumed.
+#    always-free one — and this account has NO 12-month offers at all (freetier
+#    get-free-tier-usage returns 12 entries, every one "Always Free"). Staying under the
+#    line is what keeps a whole billed service out of the deployment, so the size is
+#    printed against the limit on every build instead of being assumed.
 #
 # arm64/Graviton, not x86_64: identical free-tier allowance, ~20% cheaper per GB-second
 # past it, and the wheels exist for everything we need.

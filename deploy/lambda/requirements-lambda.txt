@@ -32,3 +32,23 @@ psycopg-pool==3.3.1
 
 # --- API --------------------------------------------------------------------------
 fastapi==0.141.1
+
+# --- tracing: NOT aws-xray-sdk, and here is the measurement ------------------------
+# X-Ray instrumentation ships in axiom/tracing.py, which speaks the daemon's UDP wire
+# format directly and adds ZERO bytes to this package. `aws-xray-sdk` is absent on
+# purpose, because listing it here breaks the build:
+#
+#   pip install --target ... aws-xray-sdk==2.15.0   (linux/aarch64, cp313, this file's flags)
+#     aws_xray_sdk  1,048 KB   wrapt    984 KB   botocore 26,632 KB
+#     urllib3       1,100 KB   dateutil 816 KB   jmespath    172 KB   six 36 KB
+#     -> 17,749,867 bytes zipped, on top of an 11.5 MB ZIP
+#
+# `Requires-Dist: botocore >=1.11.3`, and build.sh exits 1 when botocore lands in the
+# stage — correctly, since the runtime already provides it and a second copy is the
+# fastest route to the 50 MB direct-upload limit that keeps this deployment off S3 and
+# therefore at $0.00. There is no per-requirement `--no-deps` in a pip requirements
+# file, so "the SDK without botocore" is not something this file can express.
+#
+# What the SDK does inside a Lambda is one UDP datagram per subsegment to
+# AWS_XRAY_DAEMON_ADDRESS. That is ~80 lines and no dependency. See axiom/tracing.py for
+# what is given up (boto3/psycopg auto-patching, central sampling rules — neither used).

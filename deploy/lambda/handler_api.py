@@ -10,12 +10,19 @@ Why Lambda at all
 -----------------
 The demo URL has to answer from Aug 19 to Sep 15 on an account with $0.00 of credits.
 Lambda's 1M requests + 400,000 GB-seconds per month is an ALWAYS-free allowance, not a
-12-month introductory one, and a Function URL is free (an ALB is ~$16.40/month, ECS
-Fargate ~$9/month, API Gateway $1.00 per million). So the entire hosted footprint here
-is: two Lambda functions, one Function URL, two CloudWatch log groups on a 7-day
-retention. Nothing bills at rest. `deploy/free-tier/` (one EC2 instance, ~$10.40/month) and `deploy/terraform/`
-(ECS + ALB, production-shaped) both remain in the repo — this is the $0 path, not a
-replacement for the story they tell.
+12-month introductory one, and that is confirmed against this account rather than a
+pricing page (`aws freetier get-free-tier-usage` returns 12 entries, all "Always Free").
+A Function URL is free too (an ALB is ~$16.40/month, ECS Fargate ~$9/month). So the entire
+hosted footprint here is: two Lambda functions, one Function URL, two CloudWatch log groups
+on a 7-day retention. Nothing bills at rest.
+
+What this docstring used to call "the $0 path" is now the cents path, and the difference is
+not Lambda's doing: the account refuses anonymous Function URLs, so the public door is an
+API Gateway HTTP API at $1.00 per million requests — its 1M/month allowance is a
+TWELVE-MONTH offer and this account has none. Measured month-to-date across every service:
+$0.0001021066. `deploy/free-tier/` (one EC2 instance, ~$10.40/month) and
+`deploy/terraform/` (ECS + ALB, production-shaped) both remain in the repo — this is still
+the cheap path, and not a replacement for the story they tell.
 
 The four things Lambda changes
 ------------------------------
@@ -112,7 +119,7 @@ _T0 = time.time()
 
 from mangum import Mangum                       # noqa: E402 — after logging is configured
 
-from axiom import db, provider                  # noqa: E402
+from axiom import db, provider, tracing         # noqa: E402
 from axiom.api import _startup_checks, app      # noqa: E402
 
 # How long a container may sit idle before its pooled connections are no longer trusted.
@@ -184,8 +191,17 @@ _bounded_startup_checks()
 # setdefault, and nothing in axiom.api reads lifespan state.
 _asgi = Mangum(app, lifespan='off')
 
-log.info('cold start complete in %.0f ms (offline=%s)',
-         (time.time() - _T0) * 1000, os.environ.get('AXIOM_OFFLINE'))
+# X-RAY. A no-op unless this function's tracing config is Active — see axiom/tracing.py.
+# On AWS this function does not execute the engine at all (POST /api/demo/run-worker
+# invokes the worker Lambda asynchronously), so what it contributes to a trace is the
+# HTTP timeline and the thaw. The four engine boundaries are wrapped anyway, because
+# AXIOM_WORKER_INLINE=1 runs the whole claim->prepare->dispatch->settle loop inside this
+# process, and an instrumentation that only worked on one of the two deployments would
+# be a footnote rather than a fact.
+_TRACED = tracing.install()
+
+log.info('cold start complete in %.0f ms (offline=%s, traced=%s)',
+         (time.time() - _T0) * 1000, os.environ.get('AXIOM_OFFLINE'), _TRACED)
 
 
 # ======================================================================= thaw handling
@@ -217,6 +233,19 @@ def _revalidate_pools() -> None:
             log.warning('pool check failed for %s (%s: %s)', name, type(e).__name__, e)
 
 
+def _http_of(event: dict) -> tuple[str, str]:
+    """(method, path) out of either payload envelope, for naming the trace segment.
+
+    The query string is deliberately dropped. A segment name is a GROUPING key in the
+    X-Ray console, and `/api/mission?since=...` would shatter one route into a row per
+    distinct poll.
+    """
+    http = event.get('requestContext', {}).get('http', {})
+    method = (http.get('method') or event.get('httpMethod') or '?').upper()
+    path = (http.get('path') or event.get('rawPath') or event.get('path') or '/')
+    return method, path.split('?', 1)[0]
+
+
 def _is_replayable(event: dict) -> bool:
     """True only for methods where running the request twice cannot change the world.
 
@@ -245,12 +274,21 @@ def lambda_handler(event: dict, context: t.Any) -> dict:
     # First invocation in this container needs no check: `_warm_pools()` just opened
     # those connections milliseconds ago.
     thawed = _last_invocation_at > 0.0 and idle_s > _STALE_AFTER_S
+    method, path = _http_of(event)
     if thawed:
         log.info('thawed after %.0fs idle; revalidating pooled connections', idle_s)
-        _revalidate_pools()
+        # Its own subsegment because it is the one cost a warm request does NOT pay:
+        # measured at 311 ms against 169 ms, and a trace that hides it would make the
+        # first request after a freeze look like an unexplained slow database.
+        with tracing.span('axiom.pool.revalidate', idle_seconds=round(idle_s, 1)):
+            _revalidate_pools()
 
     try:
-        response = _asgi(event, context)
+        with tracing.span(f'axiom.api {method} {path}',
+                          http_method=method, http_path=path, thawed=thawed) as sp:
+            response = _asgi(event, context)
+            if sp is not None:
+                tracing.annotate(status_code=response.get('statusCode'))
     finally:
         _last_invocation_at = time.time()
 

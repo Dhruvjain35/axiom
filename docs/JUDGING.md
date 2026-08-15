@@ -231,7 +231,7 @@ other four earn. It is stated first here rather than buried.
 
 ### What is actually true
 
-- **Deployed on AWS Lambda, at $0, and it works.** Two functions (`axiom-api`, `axiom-worker`)
+- **Deployed on AWS Lambda, for cents a month, and it works.** Two functions (`axiom-api`, `axiom-worker`)
   in `us-east-2`, arm64, python3.13, talking to CockroachDB Cloud in `us-east-1`. Measured on
   the real deployment: cold start `INIT` 1447–2258 ms, warm `/api/health` 169 ms (two
   cross-region queries), `/api/crash-windows` 2.7 ms, peak memory 149 MB of 512 MB. Freeze/thaw
@@ -239,10 +239,34 @@ other four earn. It is stated first here rather than buried.
   invoke again; no request in any state returned a 500. `/`, `/styles.css`, `/api/mission`,
   `/api/crash-windows` and `POST /api/memories/recall` all answer 200. Full numbers and the
   method: `deploy/lambda/README.md`.
-- **Zero billable resources.** Lambda's 1M requests + 400,000 GB-s/month is an always-free
-  tier, not a 12-month offer, and API Gateway's 1M HTTP-API requests/month is free for 12
-  months (to Aug 2027). The ZIP is 11.2 MB, under the 50 MB direct-upload limit, so there
-  is no bucket, no ECR, no ALB, no NAT.
+- **Nothing bills at rest — and it is not $0.00, which this section claimed until
+  2026-08-14.** The account's own free-tier state was read rather than assumed:
+  `aws freetier get-account-plan-state` returns `accountPlanType: PAID` with `$0.00`
+  remaining credits, and `get-free-tier-usage` returns **twelve entries, every one "Always
+  Free" and not one "12 Months Free"**. So every AWS free tier that is a twelve-month offer
+  has expired here, and the old claim leaned on one of them. Always free on this account:
+  Lambda, CloudWatch, SNS, SQS, KMS, Glue, SES. **Billed: API Gateway ($1.00/M requests),
+  X-Ray ($5.00/M traces), Comprehend ($0.0001/unit, and off by default).**
+  **Month-to-date, all services: $0.0001021066. Projected through Sep 15: under $1.00**,
+  with an AWS Budget `axiom-zero-spend` at $1.00 alerting at 1% / 50% / 100% — the owner is
+  emailed at one cent. The ZIP is 11.2 MB, under the 50 MB direct-upload limit, so there is
+  still no bucket, no ECR, no ALB, no NAT, and nothing here has an hour hand. A project
+  whose whole argument is that it measures rather than asserts does not get to round its own
+  bill down to a rounder number.
+- **The demo is instrumented to survive four unattended weeks, and one link is unclicked.**
+  An **EventBridge Scheduler** sweep (`axiom-worker-sweep`, `rate(5 minutes)`, target
+  `axiom-worker` in `drain` mode for 45 s with `idle_exit`) keeps the queue draining, so a
+  judge arriving on Sep 3 does not open a board frozen since Aug 23 — verified firing three
+  times in six minutes. **Five CloudWatch alarms** (`axiom-api-errors`,
+  `axiom-api-throttles`, `axiom-http-5xx`, `axiom-worker-errors`, `axiom-worker-silent`) page
+  over **SNS**, with thresholds loose enough to survive AXIOM's own design: the demo crashes
+  its worker on purpose at W4, so the worker alarm needs >30 errors in 15 minutes twice
+  rather than >0. **X-Ray** traces the crash-and-recovery path with subsegments on PREPARE,
+  the provider dispatch, SETTLE and the recovery recall, annotated with task id, crash window
+  and whether the provider reported an idempotent replay. **The honest caveat:** the SNS
+  email subscription requires a human to click AWS's confirmation link and currently reads
+  `PendingConfirmation`, so **the alerting path is not yet proven end to end for this
+  subscription** — the alarms will enter ALARM and the notification will go nowhere.
 - **The engine, API, worker, Mission Control UI, audit agent, chaos harness and counterexample
   all run**, from a shell or from Lambda.
 
@@ -398,11 +422,15 @@ touching a line of engine code — so that is where the remaining effort went.
 
 Read this before going looking. Nothing below is a surprise to the authors.
 
-1. **The AWS demo URL is unmonitored, and one region deep.** It is live and anonymous (§4)
-   and `$0.00/month`, so nothing lapses for non-payment — but `.github/workflows/uptime.yml`
-   points its `BASE` at the Vercel deployment, not at this URL, so if the AWS one breaks
-   during Aug 19 – Sep 15 it breaks silently. Gateway and function are both `us-east-2`
-   against a single-region `us-east-1` cluster; nothing here survives a region loss.
+1. **The AWS demo URL's alerting is one unclicked link away from working, and it is one
+   region deep.** It is live and anonymous (§4) and costs cents against a $1.00 budget, so
+   nothing lapses for non-payment. Two things still watch it imperfectly:
+   `.github/workflows/uptime.yml` points its `BASE` at the Vercel deployment rather than this
+   URL, and the five CloudWatch alarms that *do* watch this one deliver over an SNS
+   subscription still reading `PendingConfirmation`. Until somebody clicks that confirmation
+   email, a break during Aug 19 – Sep 15 is still silent — the alarm state changes and the
+   mail goes nowhere. Gateway and function are both `us-east-2` against a single-region
+   `us-east-1` cluster; nothing here survives a region loss.
 2. **The provider is simulated.** The idempotency semantics are faithful and the provider is
    genuinely outside AXIOM's transaction, but no real money moved, so "0 duplicate refunds"
    is a statement about a database AXIOM does not write to — not about Stripe.

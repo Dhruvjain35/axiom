@@ -25,9 +25,15 @@ that honestly, with the numbers stated rather than hand-waved.
 Those instance prices are not estimates: they were pulled from the AWS Pricing API for
 `us-east-2` on 2026-08-11. Re-check them for another region before quoting them.
 
-⚠️ **This account gets no free tier.** `aws freetier get-account-plan-state` reports
-`accountPlanType: PAID` with `accountPlanRemainingCredits: $0.00`, and
-`get-free-tier-usage` returns zero rows. AWS advertises up to $200 in credits for new
+⚠️ **This account gets no *twelve-month* free tier.** `aws freetier get-account-plan-state`
+reports `accountPlanType: PAID` with `accountPlanRemainingCredits: $0.00`. This paragraph
+said `get-free-tier-usage` "returns zero rows", which was what it did on 2026-08-11; re-run
+on 2026-08-14 it returns **twelve rows, every one `Always Free` and not one
+`12 Months Free`**. The correction sharpens the warning rather than softening it: the
+always-free allowances (Lambda, CloudWatch, SNS, SQS, KMS, Glue, SES) are real and
+permanent here, and **every twelve-month offer — including the 750 EC2 hours this whole
+directory would need — is unavailable.** So the ~$10.40/month above is the real number for
+this path, not a number you might dodge. AWS advertises up to $200 in credits for new
 accounts ($100 immediately), so if that is missing it is worth chasing in **Billing →
 Credits** before launching anything — with credits the entire deployment, Bedrock
 included, is free. There is no public API for promotional credits; the console is the

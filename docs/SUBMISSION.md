@@ -291,18 +291,37 @@ The form requires a minimum of two of four.
 | **ccloud CLI** | **In use, verified** | The cluster every measured result ran on (`axiom-memory`, BASIC, AWS `us-east-1`, v26.2.5) is administered entirely through `ccloud`: `auth login`, `cluster list`, `cluster user create axiom_app`, `cluster connection-string`. `scripts/provision_ccloud.sh` wraps provisioning plus all three migrations. |
 | **Agent Skills Repo** | **Skill written and validated; no PR opened** | `skills/cockroachdb-application-development/implementing-crash-safe-work-queues/` — 390 lines capturing the pattern this project proves: partial claim index, explicit shard column over `USING HASH`, fencing token over lease, never `DELETE`, `GENERATED STORED` idempotency key, receipt-before-call. Laid out to match `cockroachlabs/cockroachdb-skills` exactly and passes their own `scripts/validate-spec.py --strict` with zero errors and zero warnings. Their `CONTRIBUTING.md` asks contributors to propose in an issue and agree scope with maintainers first, so the PR is not open. |
 
-### AWS services used — 2 genuinely in use, of 5 listed
+### AWS services used — 6 genuinely in use, of 11 listed
 
-The form requires a minimum of one. Lambda and API Gateway are in the running system; the
-other three are listed as what they are, and each row says so.
+The form requires a minimum of one. Lambda, API Gateway, EventBridge Scheduler, CloudWatch,
+SNS and X-Ray are in the running system; the other five are listed as what they are, and each
+row says so. The count is the number of `in_use: true` entries in `axiom/measurements.json`,
+not a judgement call.
+
+**State the cost honestly on the form: it is cents, not zero.** `aws freetier
+get-account-plan-state` reports `accountPlanType: PAID` with `$0.00` remaining credits, and
+`get-free-tier-usage` returns twelve entries of which **every one is "Always Free" and none is
+"12 Months Free"** — so every AWS free tier that is a twelve-month offer has expired on this
+account. Always free here: Lambda, CloudWatch, SNS, SQS, KMS, Glue, SES. **Billed here: API
+Gateway, X-Ray, Comprehend.** Month-to-date across all services: **$0.0001021066** (measured
+2026-08-14). Projection through Sep 15: **under $1.00**, guarded by an AWS Budget
+`axiom-zero-spend` at $1.00 alerting at 1% / 50% / 100%, so the owner is emailed at one cent.
+Earlier drafts of this document said `$0.00/month`; that was true of the services in use when
+it was written and is not true now.
 
 | Service | Status | Use |
 | --- | --- | --- |
-| **AWS Lambda** | **Deployed, working, and public** | `axiom-api` (FastAPI behind Mangum, serving both the API and Mission Control from `/var/task/web`) and `axiom-worker`, `us-east-2`, arm64, python3.13, 512 MB, against CockroachDB Cloud in `us-east-1`. Cold start `INIT` 1447–2258 ms; warm `/api/health` 169 ms across two cross-region queries; `/api/crash-windows` 2.7 ms; peak 149 MB of 512. Freeze/thaw tested at 17 s / 30 s / 73 s / 220 s / 14 min — no 500 in any state. 15 tests cover the worker handler. **$0**: the always-free tier is 1M requests + 400,000 GB-s/month and the 11.2 MB ZIP is under the direct-upload limit, so there is no S3, ECR, ALB or NAT. |
-| **Amazon API Gateway** | **In use — this is the public demo URL** | HTTP API `axiom-api-http` (`nq0i2ob395`, `us-east-2`), payload format 2.0, one `$default` route to `axiom-api`, `$default` stage with auto-deploy, throttled to 20 req/s burst 40 so a crawler cannot run up a bill. It exists because this account blocks anonymous Lambda Function URLs and API Gateway is not subject to that restriction. **$0**: 1M HTTP-API requests/month free for 12 months (to Aug 2027), and an idle API bills nothing. Reproducible from `deploy/lambda/apigateway.sh`, which is idempotent and takes `--destroy`. |
+| **AWS Lambda** | **Deployed, working, and public** | `axiom-api` (FastAPI behind Mangum, serving both the API and Mission Control from `/var/task/web`) and `axiom-worker`, `us-east-2`, arm64, python3.13, 512 MB, against CockroachDB Cloud in `us-east-1`. Cold start `INIT` 1447–2258 ms; warm `/api/health` 169 ms across two cross-region queries; `/api/crash-windows` 2.7 ms; peak 149 MB of 512. Freeze/thaw tested at 17 s / 30 s / 73 s / 220 s / 14 min — no 500 in any state. 15 tests cover the worker handler. **Genuinely $0**: Lambda's 1M requests + 400,000 GB-s/month is one of this account's twelve *Always Free* entries, and the 11.2 MB ZIP is under the direct-upload limit, so there is no S3, ECR, ALB or NAT. |
+| **Amazon API Gateway** | **In use — this is the public demo URL. Billed here.** | HTTP API `axiom-api-http` (`nq0i2ob395`, `us-east-2`), payload format 2.0, one `$default` route to `axiom-api`, `$default` stage with auto-deploy, throttled to 20 req/s burst 40 so a crawler cannot run up a bill. It exists because this account blocks anonymous Lambda Function URLs and API Gateway is not subject to that restriction. **Not free here**: the 1M HTTP-API requests/month allowance is a twelve-month offer and this account has no twelve-month tier, so requests bill at $1.00/M from the first one. An idle API still bills nothing — API Gateway is per-request and has no hour hand. Reproducible from `deploy/lambda/apigateway.sh`, which is idempotent and takes `--destroy`. |
+| **Amazon EventBridge Scheduler** | **In use — it is what survives four unattended weeks** | Schedule `axiom-worker-sweep`, `rate(5 minutes)`, ENABLED, target `axiom-worker` with `{"mode":"drain","seconds":45,"idle_exit":true}`. Verified firing three times in six minutes. Judging is Aug 19 – Sep 15 with nobody watching; AXIOM recovers a stalled queue the moment *any* worker runs, and this is the thing that runs one, so a judge on Sep 3 does not open a board frozen since Aug 23. `mode=drain`, deliberately not chaos — a background process that killed itself on a timer would make the error alarm meaningless. |
+| **Amazon CloudWatch** | **In use — 5 alarms, 1 dashboard, and it has already paged a human** | `axiom-api-errors`, `axiom-api-throttles`, `axiom-http-5xx`, `axiom-worker-errors`, `axiom-worker-silent`, plus the `axiom-ops` dashboard. Thresholds are loose on purpose: the demo crashes its worker **by design** at crash window W4, so the worker-error alarm needs >30 errors in 15 minutes twice rather than >0, or every judge pressing RUN MISSION pages the owner. Proven end to end rather than assumed — an alarm was driven into ALARM deliberately and the email arrived. Always Free here: 10 alarms, 5 GB logs. |
+| **Amazon SNS** | **In use — alarm delivery. Subscription PENDING until a human clicks confirm.** | Topic `axiom-ops-alerts`, email to the account owner. Always Free here: 1,000 notifications/month against five alarms designed to emit single digits. **The caveat belongs on the form as much as here**: the subscription reads `PendingConfirmation` until the confirmation link is clicked, so the alerting path is **not yet proven end to end for the current subscription** — the alarms will fire correctly and the notification will go nowhere. Re-running `observability.sh` replaces a confirmed subscription with a pending one, a defect in the script rather than in SNS. |
+| **AWS X-Ray** | **In use — the crash-and-recovery path as a clickable trace. Billed here.** | Active tracing; 5 traces recorded in a 30-minute verification window, worker logs carrying `traced=True` with X-Ray trace ids. Subsegments wrap **PREPARE, the provider dispatch, SETTLE and the recovery recall** — the four boundaries this entire submission is about — annotated with task id, crash window and whether the provider reported an idempotent replay, so a judge can *filter* the console for a replayed recovery instead of scrolling for one. Sampling bounded at 5% plus a 1/sec reservoir. **Not free here**: the 100,000 traces/month allowance is a twelve-month offer that has expired on this account, so traces bill at $5.00/M from the first one. A few thousand traces across judging is cents. |
 | **Amazon Bedrock** | **Reachable and verified from this account; NOT USABLE — the quota is structurally zero** | Model access **is** enabled on the deployment account and both models answer: `amazon.titan-embed-text-v2:0` returns the 1024-dimension embedding the schema's `VECTOR(1024)` pins (`axiom/embeddings.py`), and `anthropic.claude-sonnet-4-5` replies for exception triage (`axiom/llm.py`). Neither can be used. On-demand inference for Titan V2 is **0.0 requests/minute and 0.0 tokens/minute** — quota `L-26C560CE`, **`Adjustable: false`**, so it cannot be raised by request — and it reads 0.0 in `us-east-1`, `us-east-2` and `us-west-2` alike (`aws service-quotas list-service-quotas --service-code bedrock`). A sustained probe got **0 of 10 calls through in 87.4 s, every one a `ThrottlingException`**. Isolated single calls do sometimes succeed on a burst allowance, which is precisely why a one-off probe looks like proof and is not. **Batch inference is available and was deliberately not used**: it takes 100,000 records per job but requires a minimum of 100, and the real memory corpus is 10 distinct seed texts — padding it to clear the minimum would buy the checkbox by embedding meaningless strings. So both functions run `AXIOM_OFFLINE=1`, every quoted measurement used the deterministic stand-in, and every `axiom_memory` row now names the space it is actually in. |
-| **CloudFront** | **Distribution exists, $0, superseded by API Gateway** | Created attempting a public front door via Origin Access Control, which did not solve the 403 because OAC is also a Function URL resource-policy grant. Costs nothing, so it was left in place. |
-| **ECS Fargate / ALB / S3** | **Infrastructure written, never applied** | `Dockerfile`, `deploy/terraform/{ecs,alb,network,iam,logs}.tf`, `deploy/ecs/`. No cluster, service or task definition has been created. |
+| **CloudFront** | **Distribution exists, serves no traffic, superseded by API Gateway** | Created attempting a public front door via Origin Access Control, which did not solve the 403 because OAC is also a Function URL resource-policy grant. It is not among this account's twelve Always Free entries, but it serves zero requests and zero bytes, so it bills nothing and was left in place. |
+| **ECS Fargate / ALB / S3** | **Infrastructure written, never applied** | `Dockerfile`, `deploy/terraform/{ecs,alb,network,iam,logs}.tf`, `deploy/ecs/`. No cluster, service or task definition has been created — every one of those bills per hour rather than per request. |
+| **Amazon SES** | **Sender verified, one real send confirmed — not yet dispatching** | Sender identity verified and a send confirmed to Amazon's mailbox simulator (`MessageId 010f01a0028ad822-…`), which requires no recipient verification and touches no real inbox. Sandbox: 200 messages/day. SES **is** one of this account's Always Free entries. `in_use` stays false because the second worked example still uses the simulated relay — reachable is not deployed, and this submission does not blur those two words to lift a count. |
+| **Amazon Comprehend** | **Wired behind an authority boundary, OFF by default, billed here** | `axiom/comprehend.py` runs DetectKeyPhrases + DetectEntities + DetectSentiment over an exception description and may only **narrow** what the rule table proposed: toward escalate, never toward acting; it cannot move `amount_cents` at all; it cannot raise its own confidence. `assert_cannot_widen()` enforces it. It found a real ordering bug in the rule table (`late_delivery` above `fraud_suspected`, so a fraud text triaged as an unattended refund). `AXIOM_COMPREHEND` is unset on Vercel and Lambda, so it bills nothing while judges use the demo. **Not free here**: 50,000 units/month is a twelve-month offer that has expired on this account. $0.0001/unit; ~$0.09 spent on measurement. |
 
 ### The public URL — state this plainly on the form
 
@@ -313,9 +332,10 @@ $ curl https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/api/health
 {"ok":true,"db":true,"provider":true,"version":"0.1.0","offline":true,"errors":{}}
 ```
 
-Anonymous, unsigned, `$0.00/month`. It is served through API Gateway rather than a Lambda
-Function URL, and that detail is worth one line on the form because a judge who finds the
-403 on the Function URL should not conclude the deployment is broken.
+Anonymous, unsigned, and it costs cents a month rather than the `$0.00` this line used to
+claim. It is served through API Gateway rather than a Lambda Function URL, and that detail is
+worth one line on the form because a judge who finds the 403 on the Function URL should not
+conclude the deployment is broken.
 
 **This AWS account refuses anonymous access to Lambda
 Function URLs, and the refusal is account-level, not a defect in the policy.** The controlled
@@ -351,9 +371,10 @@ The function also answers signed HTTP requests directly, with the gateway out of
   present). The "newly created during the submission period" rule is evidenced by the commit
   history.
 - **Demo URL:** **https://nq0i2ob395.execute-api.us-east-2.amazonaws.com/** — live, anonymous,
-  `$0.00/month`, must stay up through Sep 15. Re-create with
-  `./deploy/lambda/apigateway.sh` if it is ever torn down; the URL changes if the API is
-  recreated, so tear it down only deliberately.
+  **$0.0001021066 month-to-date and projected under $1.00 through Sep 15**, must stay up
+  through judging. A 5-minute EventBridge sweep keeps its queue draining so it does not go
+  stale unattended. Re-create with `./deploy/lambda/apigateway.sh` if it is ever torn down;
+  the URL changes if the API is recreated, so tear it down only deliberately.
 - **Video:** *(under 3:00 — shot list in §9.)*
 
 ---
@@ -365,7 +386,13 @@ Ordered by how badly it hurts to get it wrong.
 ```
 [ ] Repo public, history intact, LICENSE present                       — DONE
 [ ] ≥2 CockroachDB tools genuinely used, §7 true on the day            — 3 in use, 4th written
-[ ] ≥1 AWS service genuinely used                                      — 2 of 5: Lambda + API Gateway
+[ ] ≥1 AWS service genuinely used                                      — 6 of 11: Lambda, API Gateway,
+                                                                         EventBridge Scheduler, CloudWatch,
+                                                                         SNS, X-Ray
+[ ] Cost stated as cents, not $0.00 — the account is PAID with no
+    12-month free tier, so API Gateway / X-Ray / Comprehend bill        — $0.0001021066 MTD, budget $1.00
+[ ] CLICK THE SNS CONFIRMATION EMAIL. Until someone does, five alarms
+    fire into a void and the demo can break silently for four weeks.    — PENDING
 [ ] Video recorded, UNDER 3:00, link tested in a logged-out browser
 [ ] Video says "effectively-once, not exactly-once" OUT LOUD
 [ ] Video shows a worker being SIGKILLed on camera

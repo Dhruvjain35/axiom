@@ -1,7 +1,15 @@
-# AXIOM on Lambda — the $0.00 deployment
+# AXIOM on Lambda — the cents-a-month deployment
 
-Two functions, one ZIP, one CockroachDB Cloud cluster. Nothing in this path bills at
-rest, and nothing in it is a 12-month introductory offer.
+Two functions, one ZIP, one CockroachDB Cloud cluster. Nothing in this path bills at rest.
+
+This file was titled "the $0.00 deployment" until 2026-08-14. It is not $0.00, and the
+correction is worth more than the title was: `aws freetier get-account-plan-state` reports
+`accountPlanType: PAID` with $0.00 remaining credits, and `get-free-tier-usage` returns
+**twelve entries, all "Always Free", none "12 Months Free"** — so every allowance that is a
+twelve-month offer is unavailable here. Lambda, CloudWatch, SNS, SQS, KMS, Glue and SES are
+genuinely free on this account. **API Gateway, X-Ray and Comprehend are billed.**
+Month-to-date across all services: **$0.0001021066**. Projected through Sep 15: **under
+$1.00**, guarded by the `axiom-zero-spend` budget at $1.00 alerting from the first cent.
 
 ```
 ./deploy/lambda/build.sh                      # -> build/axiom-lambda.zip (11.2 MB)
@@ -9,6 +17,8 @@ export AWS_PROFILE=axiom
 export DATABASE_URL='postgresql://axiom_app:...@...cockroachlabs.cloud:26257/axiom?sslmode=verify-full&connect_timeout=5'
 ./deploy/lambda/deploy.sh                     # creates/updates both functions
 ./deploy/lambda/apigateway.sh                 # the public URL, and prints it
+./deploy/lambda/observability.sh              # the 5-min sweep, 5 alarms, SNS, dashboard
+./deploy/lambda/billing_guard.sh              # the $1.00 budget and the billing alarm
 ```
 
 | File | What it is |
@@ -19,6 +29,8 @@ export DATABASE_URL='postgresql://axiom_app:...@...cockroachlabs.cloud:26257/axi
 | `build.sh` | cross-platform wheel build, ELF verification, trim, precompile, zip |
 | `deploy.sh` | IAM role, both functions, the Function URL, the public front door, smoke test |
 | `apigateway.sh` | **the public front door that actually works on this account.** HTTP API, `$default` route, `$default` stage, throttle, invoke permission, smoke test. Idempotent; `--destroy` removes it. |
+| `observability.sh` | **what keeps the demo alive for four unattended weeks.** EventBridge Scheduler sweep, 5 CloudWatch alarms, SNS topic + email subscription, dashboard. `--status` reads state without changing it; `--pause` / `--resume` control the sweep; `--destroy` removes exactly what it made. |
+| `billing_guard.sh` | the `axiom-zero-spend` budget, the `AWS/Billing` alarm, and a read-out of every hourly-billed resource in the account |
 | `signed_curl.py` | curl the deployed URL with a SigV4 signature |
 
 ## The public URL
@@ -77,21 +89,35 @@ Budget real time for it: the upload is ~11 MB and took 6 m 41 s on a home uplink
 
 ## What it costs
 
-| Thing | Price | Free allowance | Verdict |
+The "free allowance" column is the published one. The one that pays the bill is the last
+column, which was read back from **this account** — twelve `Always Free` entries and no
+`12 Months Free` entry at all.
+
+| Thing | Price | Published free allowance | Free on THIS account? |
 | --- | --- | --- | --- |
-| Lambda requests | $0.20 / million | **1M/month, always free** | ~1,000 requests per judging session. 0.1% of it. |
-| Lambda compute (arm64) | $0.0000133 / GB-s | **400,000 GB-s/month, always free** | 0.0845 GB-s per warm request → ~4.7M requests inside the allowance |
-| Function URL | $0.00 | — | free, always |
-| CloudFront (fallback front door) | $0.085/GB | **1 TB + 10M requests/month, always free** | free at any demo volume |
-| CloudWatch Logs | $0.50/GB ingest | 5 GB/month | 7-day retention, a few MB |
-| API Gateway (HTTP API) | $1.00 / million | **1M requests/month, free for 12 months** | the public front door. See below for why it is here after all. Throttled to 20 req/s. |
+| Lambda requests | $0.20 / million | **1M/month, always free** | **Yes.** ~1,000 requests per judging session. 0.1% of it. |
+| Lambda compute (arm64) | $0.0000133 / GB-s | **400,000 GB-s/month, always free** | **Yes.** 0.0845 GB-s per warm request → ~4.7M requests inside the allowance |
+| Function URL | $0.00 | — | free, always — and refused to anonymous callers here, which is the whole reason for the row below |
+| CloudWatch Logs / alarms | $0.50/GB ingest | 5 GB/month, 10 alarms | **Yes.** 7-day retention, a few MB; 6 alarms of 10 |
+| SNS (alarm email) | $2.00 / 100k | 1,000 notifications/month | **Yes.** Five alarms emit single digits per month |
+| EventBridge Scheduler sweep | $1.00 / million | — | 8,640 invocations/month. Not among this account's twelve free entries, so price it: **$0.0086/month** |
+| **API Gateway (HTTP API)** | **$1.00 / million** | 1M requests/month, **12-month offer** | **No.** Billed from request one. The public front door; throttled to 20 req/s. |
+| **X-Ray** | **$5.00 / million traces** | 100,000 traces/month, **12-month offer** | **No.** Billed from trace one. Worker `Active`, API `PassThrough` — see `deploy.sh`. |
+| **Comprehend** | **$0.0001 / unit** | 50,000 units/month, **12-month offer** | **No.** OFF by default (`AXIOM_COMPREHEND` unset), so it bills nothing during judging. |
+| CloudFront (fallback front door) | $0.085/GB | 1 TB + 10M requests/month, always free | Not among the twelve entries here — but the distribution serves no traffic, so it bills nothing regardless |
 | ECR / S3 / ALB / NAT | — | — | **not used.** The ZIP is 11.2 MB, under the 50 MB direct-upload limit, so there is nothing to put in a bucket. |
+
+**Month-to-date, all services: $0.0001021066** (measured 2026-08-14). **Projected through
+Sep 15: under $1.00**, with the `axiom-zero-spend` budget emailing at one cent.
 
 API Gateway's allowance is a 12-month offer rather than an always-free one, which is why
 `deploy.sh` preferred a Function URL and says so in its header. That reasoning was right
-about the cost and wrong about this account. The offer runs to Aug 2027, the demo has to
-live until Sep 15 2026, and an HTTP API with no traffic bills $0.00 — so the standing
-cost of the whole deployment is still zero.
+about the cost and wrong about this account, which refuses anonymous Function URLs
+outright. This section then said the offer "runs to Aug 2027, well past this demo's life,
+so the standing cost of the whole deployment is still zero" — and that was the mistake:
+**this account has no twelve-month tier to run out**, so API Gateway bills at $1.00/M from
+the first request. An HTTP API with no traffic still bills nothing, so nothing here accrues
+at rest; the standing cost is not zero, it is cents, and cents is what this file now says.
 
 The request count is the binding limit, not compute — by about 4.7x. See the sizing
 table in `handler_api.py`, which is measured, not estimated.
@@ -123,6 +149,35 @@ No request in any of those states returned a 500.
 deployed function. The UI is served out of `/var/task/web` by the same `StaticFiles`
 mount the container uses, which is why this deployment needs no bucket and no CDN
 origin of its own.
+
+## Keeping it alive for four unattended weeks
+
+`./deploy/lambda/observability.sh`. Judging runs Aug 19 – Sep 15 with nobody watching, and
+everything else in this directory is about getting the demo **up**. This is about the four
+weeks after that, where two things can go wrong and neither announces itself: it degrades
+quietly, or it breaks and nobody finds out for a week.
+
+| What | Detail |
+| --- | --- |
+| **EventBridge Scheduler** | `axiom-worker-sweep`, `rate(5 minutes)`, ENABLED, target `axiom-worker` with `{"mode":"drain","seconds":45,"idle_exit":true}`. Verified firing at 18:18, 18:23, 18:24. AXIOM recovers a stalled queue the moment *any* worker runs; this is the thing that runs one, so a judge on Sep 3 does not open a board frozen since Aug 23. **`mode=drain`, not chaos** — a background process that killed itself on a timer would make the error alarm meaningless. Chaos stays where a human triggers it. |
+| **5 CloudWatch alarms** | `axiom-api-errors`, `axiom-api-throttles`, `axiom-http-5xx`, `axiom-worker-errors`, `axiom-worker-silent`, plus the `axiom-ops` dashboard. Thresholds are deliberately loose enough to survive AXIOM's own design: the demo crashes its worker **on purpose** at crash window W4, so the worker-error alarm needs >30 errors in 15 minutes twice rather than >0 — otherwise every judge pressing RUN MISSION pages the owner. Driven into ALARM deliberately once and the email arrived; the history reads *"test complete, restored by observability.sh"*. |
+| **SNS** | Topic `axiom-ops-alerts`, email subscription to the account owner. |
+| **X-Ray** | Traces the crash-and-recovery path. Subsegments wrap **PREPARE, the provider dispatch, SETTLE and the recovery recall** — the four boundaries the whole argument is about — annotated with task id, crash window and whether the provider reported an idempotent replay, so a judge can *filter* for a replayed recovery in the console instead of scrolling for one. Sampling capped at 5% + a 1/sec reservoir. |
+
+**⚠ The alerting path is not yet proven end to end.** The SNS email subscription requires a
+human to click the confirmation link AWS mails out, and it currently reads
+`PendingConfirmation`. Until somebody clicks it the five alarms will enter ALARM correctly
+and the notification will go **nowhere**. Worse, re-running `observability.sh` replaces a
+confirmed subscription with a pending one — a defect in the script, not in SNS, and one that
+silently disarms alerting. Check it without changing anything:
+
+```bash
+./deploy/lambda/observability.sh --status
+```
+
+Cost arithmetic for all of it — 2.6% of Lambda's always-free compute grant, measured on a
+real sweep rather than modelled — is in the header of `observability.sh` and in
+`COST.md` §2.
 
 ## The account restriction, and the way around it
 
@@ -179,8 +234,10 @@ operation exists anywhere in the Lambda service model** — checked against boto
 
 ### What to do about it
 
-1. **`./deploy/lambda/apigateway.sh`.** This is the answer, it costs nothing, and it
-   needs no one at AWS to do anything. It is what serves the public URL today.
+1. **`./deploy/lambda/apigateway.sh`.** This is the answer, it needs no one at AWS to do
+   anything, and it is what serves the public URL today. It is **not** free on this account
+   — $1.00 per million requests, since its allowance is a twelve-month offer this account
+   does not have — but at demo volume that is cents, and nothing about it bills at rest.
 2. **Optionally, an AWS Support case** (free on Basic support): Account and billing →
    "Lambda function URL public access is denied on account 034971967323 despite a correct
    resource-based policy; anonymous requests return 403 AccessDeniedException while SigV4

@@ -3,10 +3,17 @@
 #
 #   ./deploy/lambda/billing_guard.sh [alert-email]
 #
-# The Lambda deployment is designed to sit inside the always-free tier (1M requests and
-# 400,000 GB-seconds per month, which are NOT 12-month offers). Designed-to is not the
-# same as verified-to, and the failure mode is the expensive one: nobody looks at an AWS
-# account for three weeks, and the first signal is an invoice on Sep 15 during judging.
+# The Lambda deployment sits inside the always-free tier (1M requests and 400,000
+# GB-seconds per month, which are NOT 12-month offers and which this account genuinely
+# has). The rest of the deployment does not: API Gateway, X-Ray and Comprehend have only
+# 12-month allowances, and `aws freetier get-free-tier-usage` returns 12 entries here of
+# which every single one is "Always Free" and none is "12 Months Free". So the target is
+# CENTS, measured, not $0.00 asserted — $0.0001021066 month-to-date on 2026-08-14, and
+# under $1.00 projected through Sep 15.
+#
+# Designed-to is not the same as verified-to, and the failure mode is the expensive one:
+# nobody looks at an AWS account for three weeks, and the first signal is an invoice on
+# Sep 15 during judging.
 #
 # So this installs two INDEPENDENT tripwires and one read-out:
 #
@@ -200,7 +207,7 @@ fi
 # this the alarm sits in INSUFFICIENT_DATA forever, which trains you to ignore it.
 aws cloudwatch put-metric-alarm --region "$BILLING_REGION" \
   --alarm-name "$ALARM_NAME" \
-  --alarm-description "AXIOM: estimated charges exceeded \$${LIMIT_USD}. The Lambda demo is supposed to cost \$0." \
+  --alarm-description "AXIOM: estimated charges exceeded \$${LIMIT_USD}. The demo is supposed to cost cents — measured \$0.0001021066 month-to-date on 2026-08-14 — so a dollar means something changed." \
   --namespace AWS/Billing --metric-name EstimatedCharges \
   --dimensions Name=Currency,Value=USD \
   --statistic Maximum --period 21600 --evaluation-periods 1 \

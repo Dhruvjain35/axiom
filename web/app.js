@@ -209,8 +209,12 @@ const AUX_MIN_MS = 4000;
  *  cost decision in this file. A freshly seeded board is 30 READY tasks that will not
  *  move until a human presses RUN MISSION — it is the demo's RESTING state, not its
  *  live one — and counting READY as live pinned the poll at 1s through it forever:
- *  255 requests/minute, 11,000,000 a month, eleven times the entire free tier, from a
- *  tab sitting on an idle board. Measured, not theorised. When a task does leave READY
+ *  255 requests/minute, 11,000,000 a month, eleven times Lambda's always-free 1M, from a
+ *  tab sitting on an idle board. Measured, not theorised. That arithmetic got worse once
+ *  the public front door became API Gateway: its 1M/month allowance is a twelve-month
+ *  offer and the deployment account has no twelve-month tier, so those same 11M requests
+ *  are ~$11 at $1.00/M against a $1.00 budget alarm. The ladder below is why one forgotten
+ *  tab does not do that. When a task does leave READY
  *  the renderers set S.changed and the ladder snaps back to 1s within one cycle.
  *
  *  AWAITING_APPROVAL is absent for the same reason: it can sit for an hour waiting on a
@@ -2907,14 +2911,24 @@ const RECEIPTS_RECORDED = {
     { name: 'Distributed Vector Indexing', status: 'In use, verified on Cloud', in_use: true },
     { name: 'Cloud Managed MCP Server', status: 'In use, verified against the live server', in_use: true },
     { name: 'ccloud CLI', status: 'In use, verified', in_use: true },
-    { name: 'Agent Skills Repo', status: 'Skill written and validated; PR not opened', in_use: false },
+    { name: 'Agent Skills Repo', status: 'Submitted upstream — PR open, not merged', in_use: false },
   ],
+  // Order and wording track axiom/measurements.json's aws_services block exactly, because
+  // the moment this literal editorialises it stops being the same artifact the API serves.
+  // Six of eleven are in_use: Lambda, API Gateway, EventBridge Scheduler, CloudWatch, SNS,
+  // X-Ray. SES is verified-and-reachable but not dispatching; Comprehend is wired and OFF.
   aws_services: [
     { name: 'AWS Lambda', status: 'Deployed, public, and serving the demo', in_use: true },
     { name: 'Amazon API Gateway (HTTP API)', status: 'In use — the public AWS front door', in_use: true },
     { name: 'Amazon Bedrock', status: 'Reachable and verified; NOT USABLE on this account — quota is structurally zero', in_use: false },
     { name: 'CloudFront', status: 'Distribution exists, $0, serves no traffic', in_use: false },
     { name: 'ECS Fargate / ALB / S3', status: 'Infrastructure written, never applied', in_use: false },
+    { name: 'Amazon EventBridge Scheduler', status: 'In use — keeps the demo alive across four unattended weeks', in_use: true },
+    { name: 'Amazon CloudWatch', status: 'In use — 5 alarms, 1 dashboard, and it has already paged a human', in_use: true },
+    { name: 'Amazon SNS', status: 'In use — alarm delivery; subscription PENDING until the owner clicks confirm', in_use: true },
+    { name: 'AWS X-Ray', status: 'In use — the crash-and-recovery path as a clickable trace', in_use: true },
+    { name: 'Amazon SES', status: 'Sender verified, sending confirmed — wiring into the broadcast domain', in_use: false },
+    { name: 'Amazon Comprehend', status: 'Wired into triage behind an authority boundary, OFF by default, and NOT free here', in_use: false },
   ],
 };
 
@@ -2938,7 +2952,12 @@ function pick(o, keys) {
  *  happened. AWS rendered "3/4 in use", counting Amazon Bedrock — whose models ARE enabled
  *  on this account and DO answer, but whose on-demand quota for Titan V2 is 0.0 requests
  *  per minute and not adjustable, so nothing calls it in a loop — and CloudFront, which
- *  serves no traffic. The honest count is 2 of 5: Lambda and API Gateway.
+ *  serves no traffic. The honest count today is 6 of 11: Lambda, API Gateway, EventBridge
+ *  Scheduler, CloudWatch, SNS and X-Ray are in the running system; Bedrock, CloudFront,
+ *  ECS/ALB/S3, SES and Comprehend are not. SES is the instructive one — its sender is
+ *  verified and a real send is confirmed, and it is STILL false, because nothing dispatches
+ *  through it yet and "reachable" is not "in use". That is the same rule that keeps
+ *  Bedrock out, applied to a service it would have been easy to count.
  *
  *  A judge who hovers the tooltip sees the detail contradict the headline, and on the one
  *  page whose entire argument is that this project does not overclaim. So the fact is now

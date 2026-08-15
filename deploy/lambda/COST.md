@@ -1,14 +1,43 @@
 # What the Lambda deployment costs
 
-**Target: $0.00.** Not "cheap" — zero. The operator has no credits (`aws freetier
-get-account-plan-state` reports `accountPlanType: PAID` with $0.00 remaining, and the
-Credits console says "You don't have any redeemable credits"), and the demo URL has to
-stay up unattended from **Aug 19 to Sep 15 2026** — 28 days, 672 hours. A design that
-costs a dollar is the wrong design.
+**Target: nothing with an hour hand, and a bill in cents.** This document opened with
+"**Target: $0.00.** Not 'cheap' — zero" until 2026-08-14, and that target was met for as
+long as the deployment was Lambda and CloudWatch only. It is not met today, and the
+correction belongs at the top rather than in a footnote.
 
-That is only achievable because **Lambda's free tier is *always* free**, not a 12-month
-introductory offer. So is CloudWatch's. Almost nothing else on AWS is, which is what
-makes most of this document a list of things not to do.
+The operator has no credits (`aws freetier get-account-plan-state` reports
+`accountPlanType: PAID` with $0.00 remaining, and the Credits console says "You don't have
+any redeemable credits"), and the demo URL has to stay up unattended from **Aug 19 to
+Sep 15 2026** — 28 days, 672 hours. A design that costs a dollar is still the wrong design.
+A design that costs a hundredth of one, stated out loud, is not.
+
+**What changed is not the prices — it is that the account's free-tier state was finally
+read instead of assumed:**
+
+```console
+$ aws freetier get-account-plan-state
+  accountPlanType "PAID" · accountPlanRemainingCredits $0.00
+$ aws freetier get-free-tier-usage --query 'freeTierUsages[].freeTierType'
+  12 entries. Every one "Always Free". ZERO "12 Months Free".
+```
+
+Every allowance below that this document calls a **12-month offer is therefore not
+available here at all** — not "expiring in 2027", not available. The distinction the whole
+document is built on survives; what changes is which side of it three services land on.
+
+| | Services | Consequence here |
+| --- | --- | --- |
+| **Always Free on this account** | Lambda, CloudWatch, SNS, SQS, KMS, Glue, SES | genuinely $0.00 at demo volume, permanently |
+| **Billed on this account** | **API Gateway, X-Ray, Comprehend** | their allowances are 12-month offers, so they bill from request one |
+
+**Measured month-to-date, all services: $0.0001021066** (2026-08-14,
+`aws ce get-cost-and-usage --granularity MONTHLY --group-by Type=DIMENSION,Key=SERVICE`).
+**Projected through Sep 15: under $1.00.** The guard is an AWS Budget `axiom-zero-spend`
+at $1.00, alerting at 1% / 50% / 100% — the owner is emailed at **one cent**.
+
+So most of this document remains a list of things not to do, and its central claim — that
+**nothing in this deployment bills by the hour** — is still exactly true. What it may no
+longer say is `$0.00`.
 
 Every rate below was read from the **AWS Price List API on 2026-08-11** against
 `us-east-2` (Ohio), the region this deploys to. Free-tier *limits* are not in the pricing
@@ -35,14 +64,20 @@ aws pricing get-products --region us-east-1 --service-code AWSLambda \
 | AWS Budgets | first 2 free, then $0.02/day each | Budgets pricing page |
 | Cost Explorer API | **$0.01 per request** | Cost Explorer pricing page |
 
-| Always-free allowance | Amount | Source |
-| --- | --- | --- |
-| Lambda requests | 1,000,000 / month | Free Tier page — marked *Always free* |
-| Lambda compute | 400,000 GB-seconds / month | Free Tier page — marked *Always free* |
-| CloudWatch Logs ingestion | 5 GB / month | Free Tier page — *Always free* |
-| CloudWatch Logs storage | 5 GB | Free Tier page — *Always free* |
-| CloudWatch alarms | 10 alarms | Free Tier page — *Always free* |
-| CloudFront | 1 TB out + 10,000,000 requests / month | Free Tier page — *Always free* |
+| Always-free allowance | Amount | Source | Confirmed on THIS account |
+| --- | --- | --- | --- |
+| Lambda requests | 1,000,000 / month | Free Tier page — marked *Always free* | yes |
+| Lambda compute | 400,000 GB-seconds / month | Free Tier page — marked *Always free* | yes |
+| CloudWatch Logs ingestion | 5 GB / month | Free Tier page — *Always free* | yes |
+| CloudWatch Logs storage | 5 GB | Free Tier page — *Always free* | yes |
+| CloudWatch alarms | 10 alarms | Free Tier page — *Always free* | yes |
+| SNS notifications | 1,000 email / month | Free Tier page — *Always free* | yes |
+| CloudFront | 1 TB out + 10,000,000 requests / month | Free Tier page — *Always free* | **not among the 12 entries `get-free-tier-usage` returns here.** The distribution serves no traffic, so it bills nothing either way — but do not plan around this row on this account. |
+
+The right-hand column is the point of the table. Published *Always free* is a statement
+about AWS's price list; the twelve entries `get-free-tier-usage` returns are a statement
+about **this account**, and only the second one pays the bill. Every row marked yes was
+read back from the account, not from a pricing page.
 
 The Lambda free tier is **not** architecture-dependent: 400,000 GB-seconds is 400,000
 GB-seconds whether the function is arm64 or x86. Architecture only changes what the
@@ -140,9 +175,13 @@ compute  : 11,016,000 × 0.1716 s × 0.5 GB = 945,173 GB-s
                                                         total ≈ $9.27 / month
 ```
 
-Nine dollars is not a catastrophe in absolute terms. It is a total failure against a
-$0.00 budget, and it also means the free tier is gone for everything else in the account
-for the rest of the month, including the worker the demo actually needs.
+Nine dollars is not a catastrophe in absolute terms. It is nine times the
+`axiom-zero-spend` budget, and it also means Lambda's always-free tier is gone for
+everything else in the account for the rest of the month, including the worker the demo
+actually needs. On the AWS deployment it is worse than the figure above, because every one
+of those 11,016,000 requests also crosses **API Gateway, which is billed on this account** —
+another ~$11 at $1.00/M, since its 1M allowance is a 12-month offer this account does not
+have.
 
 **What `web/app.js` does about it.** The poll is a ladder — 1s → 2s → 5s → 15s → 30s →
 60s — that steps out when nothing changes, snaps back to 1s when anything does, and
@@ -202,15 +241,39 @@ session request count are printed in the header where an operator can see them.
 
 ### 2. Putting the worker on a schedule
 
-Do not. At 512 MB, one worker invocation per minute costs:
+This section said "**Do not.**" and ended "an EventBridge rule pointed at it is the single
+easiest way to turn this deployment into a bill." **There is now an EventBridge Scheduler
+schedule pointed at it**, so the section owes an argument rather than a rule.
+
+The warning was about a *per-minute* schedule. At 512 MB, one worker invocation per minute:
 
 ```
 60 s runs : 43,200 runs × 30 GB-s   = 1,296,000 GB-s → overage $11.95/month
 300 s runs: 43,200 runs × 150 GB-s  = 6,480,000 GB-s → overage $80.99/month
 ```
 
-The worker is invoked on demand and exits. An EventBridge rule pointed at it is the
-single easiest way to turn this deployment into a bill.
+That is still true and still disqualifying. `axiom-worker-sweep` is a different shape:
+`rate(5 minutes)`, `mode=drain`, `seconds=45`, `idle_exit=true` — 8,640 invocations a month,
+and the steady state is an **empty** queue, which `idle_exit` returns from immediately.
+Measured on a real scheduled sweep against an empty queue, cold start included: 0 tasks,
+1,978 ms wall, **2,387 ms billed**, 83 MB of 512.
+
+```
+8,640 × 2.387 s × 0.5 GB = ~10,300 GB-s/month → 2.6% of the always-free 400,000
+8,640 requests                                → 0.9% of the always-free 1,000,000
+8,640 × 807 B of logs = 7.0 MB/month          → 0.139% of the always-free 5 GB
+```
+
+Two orders of magnitude between the schedule this document forbids and the one it runs, and
+the difference is the interval and `idle_exit`, not optimism. The full derivation, including
+why five minutes and not one, is in the header of `deploy/lambda/observability.sh`.
+
+**What it buys** is the reason it is worth any GB-seconds at all: judging runs Aug 19 –
+Sep 15 unattended, AXIOM recovers a stalled queue the moment *any* worker runs, and without
+this nothing runs one. A judge on Sep 3 would open a board frozen since Aug 23 — a correct
+system that looks broken.
+
+`POST /api/demo/run-worker` is still the on-demand path, and the schedule does not replace it.
 
 ### 3. Async invoke retries
 
@@ -257,9 +320,11 @@ where a debugging `print()` left in a loop has a dollar cost.
 ### 5. CloudFront, if the public function URL is ever refused
 
 `deploy.sh` puts a CloudFront distribution in front of the function URL only as a
-fallback (`FRONT=cloudfront`), and none exists today — `aws cloudfront list-distributions`
-returns `None`. CloudFront's free tier is **always free**: 1 TB out and 10,000,000
-requests per month, plus the TLS certificate.
+fallback (`FRONT=cloudfront`). CloudFront's **published** free tier is always-free — 1 TB
+out and 10,000,000 requests per month, plus the TLS certificate — but it is **not among the
+twelve entries this account's `get-free-tier-usage` returns**, so do not plan around it
+here. The distribution that exists serves no traffic and transfers no bytes, which is why
+it bills nothing; that is a fact about its traffic, not about a tier.
 
 Response sizes, measured with `curl` against a 30-task board:
 
@@ -309,7 +374,7 @@ resource that bills whether or not anyone visits. Nothing in this deployment has
 | **NAT Gateway** | $0.045/h = **$32.85/mo** + $0.045/GB processed | Never free. A Lambda in a VPC that needs egress needs one; so this deployment keeps the functions **out** of any VPC. |
 | **ECR** | 500 MB storage | **12-month offer, not always-free.** This is the whole reason the deployment is ZIP-based rather than container-image. |
 | **S3** | 5 GB standard | **12-month offer.** Assets ship inside the ZIP instead. |
-| **API Gateway** | 1M calls (REST and HTTP) | **12-month offer.** Function URLs are free forever and do the same job here. |
+| **API Gateway** | 1M calls (REST and HTTP) | **12-month offer, and this account has no 12-month tier.** This row said "Function URLs are free forever and do the same job here" — correct about cost, wrong about this account, which refuses anonymous Function URLs. **It was added anyway.** See below. |
 | **Provisioned concurrency** | per GB-s of *idle* time | Bills for doing nothing and is **excluded from the free tier**. The single most expensive checkbox on the Lambda console. |
 | **EC2** | `t4g.nano` $0.0042/h = $3.07/mo | The 750 h/month `t2/t3.micro` allowance is a **12-month offer**, and this account is past it. |
 | **Elastic IP** | $0.005/h = $3.65/mo | Billed whether attached or not, since Feb 2024. |
@@ -320,18 +385,40 @@ resource that bills whether or not anyone visits. Nothing in this deployment has
 production-shaped story. **Neither is deployed.** Applying either one starts an hourly
 meter; `deploy/COST.md` prices them out in full.
 
+## What is not free here and was added anyway, on purpose
+
+Three services in the running system have no free-tier entry on this account, because their
+allowances are twelve-month offers. Each one is here for a reason that survived the price
+being real, and none of them has an hour hand:
+
+| Service | Rate here | Why it earned it |
+| --- | --- | --- |
+| **API Gateway (HTTP API)** | $1.00 / million requests | It is the only public front door that works on this account — anonymous Function URLs are refused account-wide. Throttled to 20 req/s burst 40, and an idle API bills nothing. |
+| **X-Ray** | $5.00 / million traces recorded | The crash-and-recovery path as a clickable timeline, with subsegments on PREPARE / dispatch / SETTLE / recovery recall. Sampling capped at 5% + 1/sec reservoir; the API stays `PassThrough` so a polling tab cannot mint traces. A few thousand traces of judging is cents. |
+| **Comprehend** | $0.0001 / unit | Wired into triage behind an authority boundary and **OFF by default** — `AXIOM_COMPREHEND` is unset on Vercel and Lambda, so judges cost nothing. ~$0.09 spent on measurement, once. |
+
+**Total measured month-to-date across every service: $0.0001021066.** Projected through
+Sep 15: under $1.00. That is the honest number, and it is a better argument than the
+`$0.00` this file used to print — a project that argues for measurement does not get to
+round its own bill down to a rounder number.
+
 ## The guardrails
 
 `deploy/lambda/billing_guard.sh` installs two independent tripwires and a read-out:
 
-1. **One AWS Budget**, $1/month, email at **1% / 50% / 100% of actual** spend. The 1%
-   threshold is the important one: it fires on the first cent, days before there is a
-   real number to react to. Credits and refunds are excluded from the calculation so a
-   credit can never mask live usage.
+1. **One AWS Budget**, `axiom-zero-spend`, $1/month, email at **1% / 50% / 100% of
+   actual** spend. The 1% threshold is the important one, and it is now the one that
+   matters rather than a theoretical tripwire: month-to-date is $0.0001021066, so the
+   first alert lands at **one cent**, days before there is a real number to react to.
+   Credits and refunds are excluded from the calculation so a credit can never mask live
+   usage.
 2. **A CloudWatch alarm** on `AWS/Billing` `EstimatedCharges > $1` — a different
    pipeline with a different failure mode, landing in the same inbox. Within the 10
-   always-free alarms.
+   always-free alarms, which CloudWatch genuinely is on this account.
 3. **Month-to-date spend**, printed, read from the free Budgets API.
+
+`observability.sh` adds five more alarms on top and **verifies this budget without
+modifying it**; the budget belongs to `billing_guard.sh` and to no other file.
 
 It then enumerates every hourly-billed resource type in the account and prints them in
 red if any exist.
