@@ -24,7 +24,12 @@ with this week.
 
 WHY DOLLARS ARE NOT MERELY THE WRONG AXIS BUT A DANGEROUS ONE
 -------------------------------------------------------------
-A 40,000-recipient send costs about forty cents of SES. Under a money-shaped authority
+A 40,000-recipient send costs about four dollars of SES — $0.10 per 1,000 outbound
+messages, the list price recorded in axiom/ses.py. (This read "forty cents" until an
+audit caught it: wrong by a factor of ten, and it had propagated into the film, where it
+was rendered at 54px and spoken aloud. The argument never depended on it — $4.00 still
+clears a $200 ceiling by fifty times — which is what made the error pure cost.) Under a
+money-shaped authority
 model — "the agent may act unattended up to $200" — that campaign sails through with
 three orders of magnitude of headroom, while a $300 refund to one customer stops and
 waits for a human. The dollar amount is not a conservative proxy for blast radius here;

@@ -743,7 +743,8 @@ BROADCAST_CAMPAIGNS: tuple[tuple[str, str, str, int, int], ...] = (
 
 # IN RECIPIENTS. A campaign that would reach more people than this stops and waits for a
 # human no matter how little it costs to send — the same number expressed in dollars
-# (about five cents of SES) would clear any money-shaped policy in the system without
+# (about twenty cents of SES at $0.10 per 1,000 messages) would clear any money-shaped
+# policy in the system without
 # anyone being asked.
 BROADCAST_CEILING_RECIPIENTS = 2_000
 BROADCAST_BUDGET_RECIPIENTS = 30_000
@@ -998,7 +999,7 @@ def domains() -> list[dict]:
                   'authority ceiling is denominated in dollars; above it a human decides.',
         'broadcast': 'A message reaches people who cannot be made to un-receive it. The '
                      'ceiling is denominated in RECIPIENTS — the same send costs about '
-                     'five cents, so a money-shaped policy would never have asked.',
+                     'twenty cents, so a money-shaped policy would never have asked.',
     }
 
     live: dict[str, dict] = {}

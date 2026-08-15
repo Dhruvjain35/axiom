@@ -18,7 +18,7 @@
     "The file lives beside the code rather than in docs/ because vercel.json's",
     "excludeFiles trims docs/ and scripts/ out of the deployed function bundle."
   ],
-  "tests": 208,
+  "tests": 260,
   "chaos": {
     "workers_sigkilled": 30,
     "worker_restarts": 42,
@@ -281,5 +281,6 @@
     "measured_at": "2026-08-14",
     "command": "aws ce get-cost-and-usage --granularity MONTHLY --group-by Type=DIMENSION,Key=SERVICE",
     "recorded": true
-  }
+  },
+  "tests_note": "260 passed, 3 skipped, measured with AWS_* unset entirely — the suite is hermetic and needs no credentials, which is what makes it worth running. Was 208 before the Comprehend, SES and tracing suites landed. The 3 skips are live-AWS tests gated behind an explicit opt-in: ambient credentials are not consent to spend."
 }

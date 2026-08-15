@@ -67,7 +67,8 @@ BROADCAST_TENANT = uuid.uuid5(uuid.NAMESPACE_DNS, 'broadcast.axiom.demo')
 
 # The authority ceiling, IN RECIPIENTS. A campaign that would reach more people than
 # this stops and waits for a human, no matter how little it costs to send. That is the
-# whole point: the same number expressed in dollars (about five cents of SES) would clear
+# whole point: the same number expressed in dollars (about twenty cents of SES, at $0.10
+# per 1,000 outbound messages) would clear
 # any money-shaped policy in the system without anyone being asked.
 UNATTENDED_CEILING = 2_000
 BLAST_RADIUS_BUDGET = 30_000
