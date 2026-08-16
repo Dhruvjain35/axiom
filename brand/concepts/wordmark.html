@@ -1,0 +1,101 @@
+<meta charset="utf-8">
+<title>AXIOM — wordmark</title>
+<style>
+  /* ------------------------------------------------------------------
+     AXIOM — type only.
+
+     TYPEFACE. Futura Medium. Renner built the alphabet out of the
+     circle, the triangle and the square — letters derived from
+     primitives taken as given, with nothing behind them. That is what
+     an axiom is, and Futura's A is a bare triangle with a low crossbar,
+     which leaves exactly one place to put exactly one idea.
+
+     THE IDEA. The A's crossbar is drawn as a single rule that begins
+     inside the letter, replaces the crossbar, passes through the right
+     leg and keeps going. The A becomes a turnstile — |- , "proves".
+     In logic the turnstile has nothing to its left: what stands there
+     is assumed, not derived. The bar runs one way only, which is also
+     the fencing token: a number that only goes up, a door that closes
+     behind you.
+
+     THE COLOUR. The bar is amber, the product's colour for "a receipt
+     exists, an effect may exist." Green would claim exactly-once, which
+     is not available to anyone. Red is spent only on real failure.
+     Amber is the only honest colour for this claim, and it is the only
+     colour on the card.
+
+     Charter sets the line: Carter drew it to hold together when the
+     output device cannot resolve fine detail, which is the exact
+     condition of a 300px gallery tile.
+     ------------------------------------------------------------------ */
+
+  html, body { margin:0; padding:0; background:#0a0c0b; overflow:hidden; }
+  body { width:1920px; height:1280px; }
+
+  :root{
+    --bg:#0a0c0b; --rule:#1d2220; --rule2:#2a302d;
+    --text:#dadfda; --dim:#8e958f; --faint:#5c635e; --hot:#e07b30;
+  }
+
+  /* One unit = one design px on the 1920-wide card, so the 300px
+     gallery tile is the same picture rather than a crop of its corner. */
+  .card{ position:fixed; inset:0; background:var(--bg); --s:calc(100vw / 1920); }
+  .abs{ position:absolute; }
+
+  .kicker{
+    left:calc(150*var(--s)); top:calc(150*var(--s));
+    font-family:"SF Mono", ui-monospace, Menlo, monospace;
+    font-size:calc(30*var(--s)); letter-spacing:calc(5.6*var(--s));
+    line-height:1; color:var(--faint); white-space:nowrap;
+  }
+  .rule{
+    left:calc(150*var(--s)); top:calc(252*var(--s));
+    width:calc(1620*var(--s)); height:calc(2*var(--s)); background:var(--rule);
+  }
+  .word{ left:calc(150*var(--s)); top:calc(452*var(--s));
+         width:calc(1620*var(--s)); height:calc(342.51*var(--s)); display:block; }
+  .line{
+    left:calc(150*var(--s)); top:calc(866*var(--s));
+    font-family:Charter, "Charter BT", Georgia, serif;
+    font-size:calc(74*var(--s)); line-height:1; color:var(--text); white-space:nowrap;
+  }
+  .markpos{ left:calc(1663.7*var(--s)); top:calc(1026*var(--s)); }
+  #mark{ display:block; width:calc(106.28*var(--s)); height:calc(104*var(--s)); }
+
+  /* The render script measures #mark on the 1920 page, then re-scales it
+     inside a 32px viewport to make the favicon. Under that viewport a
+     vw-derived size would collapse to nothing, so hold the element at its
+     1920-page pixel size here and let the script's scale do the work. */
+  @media (max-width:120px){ #mark{ width:106.28px; height:104px; } }
+</style>
+
+<div class="card">
+
+  <div class="abs kicker">EXECUTION AND MEMORY IN ONE COMMIT</div>
+  <div class="abs rule"></div>
+
+  <!-- AXIOM. Futura Medium 429.48px, tracked +0.0625em, with +0.09em added
+       after the A so the bar has air before the X. Ink spans the 1620
+       measure exactly; the viewBox's bottom edge is the baseline. -->
+  <svg class="abs word" viewBox="0 0 1620 342.51" aria-label="AXIOM">
+    <g font-family="Futura" font-weight="500" font-size="429.48" fill="#dadfda">
+      <text x="-2.147" y="342.51">A</text>
+      <text x="381.48" y="342.51" letter-spacing="26.842">XIOM</text>
+    </g>
+    <rect x="107.37" y="218.09" width="242.66" height="42.99" fill="#e07b30"/>
+  </svg>
+
+  <div class="abs line">Agents crash. The refund still goes out once.</div>
+
+  <!-- the mark: the same A, alone. The viewBox is its exact ink box — the
+       A on the left, the bar's cut end on the right — so the favicon
+       crop carries no dead margin. -->
+  <div class="abs markpos">
+    <svg id="mark" viewBox="0 0 815 797.5" aria-label="AXIOM mark">
+      <text x="-5" y="797.5" font-family="Futura" font-weight="500"
+            font-size="1000" fill="#dadfda">A</text>
+      <rect x="250" y="507.8" width="565" height="100.1" fill="#e07b30"/>
+    </svg>
+  </div>
+
+</div>

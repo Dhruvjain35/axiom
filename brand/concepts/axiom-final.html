@@ -1,0 +1,56 @@
+<!--
+  AXIOM — the mark.
+
+  The mark IS the letter A, drawn rather than set, and the crossbar carries the whole idea:
+  it is broken, and the letter still stands. That is the product in one gesture — a refund
+  crosses a crash and comes out the far side once. The gap is amber (#e07b30) because in the
+  running system amber means exactly "a receipt exists, an effect may exist, we do not yet
+  know" — the state the gap is about. It is the only colour on the card.
+
+  Composition is left-aligned rather than centred because Devpost crops thumbnails to 3:2 and
+  shows them at ~300px in a grid: a centred layout at that size reads as a slide, an anchored
+  one reads as an identity. AXIOM is set enormous for the same reason — at tile size the word
+  is the only thing guaranteed to survive, so it does the work.
+
+  Futura for the wordmark: geometric, pre-war, drawn from compass and rule. Charter for the
+  sentence, which is the product's own prose face. Nothing downloads.
+-->
+<style>
+  html,body{margin:0;padding:0}
+  body{width:1920px;height:1280px;background:#0a0c0b;overflow:hidden;
+       display:flex;flex-direction:column;justify-content:space-between;padding:96px 120px 88px;box-sizing:border-box;-webkit-font-smoothing:antialiased}
+  .mono{font-family:"SF Mono",SFMono-Regular,Menlo,monospace;letter-spacing:.30em;
+        text-transform:uppercase;font-size:21px;color:#5c635e}
+  .row{display:flex;align-items:baseline;justify-content:space-between}
+  #mark{width:172px;height:172px;flex:none}
+  .word{font-family:Futura,"Avenir Next",sans-serif;font-weight:500;font-size:300px;
+        line-height:.86;letter-spacing:.085em;color:#dadfda;margin:0 0 0 -8px}
+  .say{font-family:Charter,"Iowan Old Style",Georgia,serif;font-size:56px;line-height:1.32;
+       color:#8e958f;margin-top:34px;max-width:1180px}
+  .say b{color:#dadfda;font-weight:400}
+  .rule{height:1px;background:#2a302d;margin-bottom:26px}
+</style>
+
+<div class="row">
+  <svg id="mark" viewBox="0 0 100 100" fill="none">
+    <!-- the two strokes of the A: it stands on its own feet -->
+    <path d="M9 93 L50 9 L91 93" stroke="#dadfda" stroke-width="14.5" stroke-linecap="square"/>
+    <!-- the crossbar, broken. the letter is still an A. -->
+    <path d="M23 67 H45.5" stroke="#e07b30" stroke-width="13"/>
+    <path d="M54.5 67 H77" stroke="#e07b30" stroke-width="13"/>
+  </svg>
+  <div class="mono">Crash-safe execution &amp; memory for agents</div>
+</div>
+
+<div>
+  <div class="word">AXIOM</div>
+  <div class="say">An agent refunds a customer, then crashes.<br>It wakes up and the refund <b>still goes out once.</b></div>
+</div>
+
+<div>
+  <div class="rule"></div>
+  <div class="row">
+    <div class="mono">CockroachDB &times; AWS</div>
+    <div class="mono" style="color:#3d4441">Effectively-once &middot; never exactly-once</div>
+  </div>
+</div>

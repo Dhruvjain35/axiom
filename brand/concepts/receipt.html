@@ -1,0 +1,141 @@
+<meta charset="utf-8">
+<title>AXIOM — receipt</title>
+<style>
+  /* --------------------------------------------------------------------
+     One scale variable drives the whole card, so the 300px gallery tile is
+     a real re-layout at real pixel sizes rather than a crop. The min-width
+     guard keeps --s at 1 inside the 32px favicon harness, which measures
+     #mark at full size before scaling it down itself.
+     -------------------------------------------------------------------- */
+  :root { --s: 1; }
+  @media (min-width: 100px) and (max-width: 1000px) { :root { --s: 0.15625; } }
+
+  html, body { margin:0; padding:0; }
+  body {
+    width:  calc(1920px * var(--s));
+    height: calc(1280px * var(--s));
+    background:#0a0c0b;
+    overflow:hidden;
+    position:relative;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  .eyebrow {
+    position:absolute;
+    left: calc(160px * var(--s));
+    top:  calc(150px * var(--s));
+    font-family:"SF Mono", Menlo, monospace;
+    font-size: calc(32px * var(--s));
+    letter-spacing:.22em;
+    text-transform:uppercase;
+    color:#5c635e;
+    white-space:nowrap;
+  }
+
+  /* offset by the mark's own 28px internal padding so the printed block
+     starts on the 160px text margin, not 28px right of it */
+  .markslot {
+    position:absolute;
+    left: calc(132px * var(--s));
+    top:  calc(300px * var(--s));
+  }
+  #mark {
+    width:  calc(456px * var(--s));
+    height: calc(456px * var(--s));
+    background:#0a0c0b;
+    /* the favicon harness scales #mark about its centre while the grid has
+       already clamped it to the start edge; pinning the origin keeps it in
+       frame. !important beats the inline style the harness writes. */
+    transform-origin: 0 0 !important;
+  }
+  #mark svg { display:block; width:100%; height:100%; }
+
+  .word {
+    position:absolute;
+    left: calc(744px * var(--s));
+    top:  calc(397px * var(--s));
+    font-family:Copperplate, serif; font-weight:700;
+    font-size: calc(280px * var(--s));
+    line-height:1;
+    letter-spacing:.055em;
+    color:#dadfda;
+    white-space:nowrap;
+  }
+
+  .meta {
+    position:absolute;
+    left: calc(756px * var(--s));
+    top:  calc(688px * var(--s));
+    font-family:"SF Mono", Menlo, monospace;
+    font-size: calc(28px * var(--s));
+    line-height: calc(46px * var(--s));
+    letter-spacing:.11em;
+    text-transform:uppercase;
+    color:#3d4441;
+    white-space:pre;
+  }
+
+  /* the card's own perforation */
+  #perf {
+    position:absolute;
+    left:0; width:100%;
+    top: calc(950px * var(--s));
+    height: calc(4px * var(--s));
+    background: repeating-linear-gradient(to right,
+      #2a302d 0 calc(20px * var(--s)),
+      transparent calc(20px * var(--s)) calc(36px * var(--s)));
+  }
+  /* the one bar that spans the card's tear, on the mark's own column */
+  #punch {
+    position:absolute;
+    left: calc(160px * var(--s));
+    top:  calc(946px * var(--s));
+    width:  calc(400px * var(--s));
+    height: calc(12px * var(--s));
+    background:#e07b30;
+  }
+
+  .pos {
+    position:absolute;
+    left: calc(160px * var(--s));
+    top:  calc(1058px * var(--s));
+    font-family:"SF Mono", Menlo, monospace;
+    font-size: calc(70px * var(--s));
+    letter-spacing:.03em;
+    color:#8e958f;
+    white-space:nowrap;
+  }
+  .pos b { color:#dadfda; font-weight:600; }
+</style>
+
+<div class="eyebrow">Refunded once. Crashed. Did not refund again.</div>
+
+<div class="markslot">
+  <div id="mark">
+    <svg viewBox="0 0 114 114" xmlns="http://www.w3.org/2000/svg">
+      <!-- the record: what went out into the world -->
+      <rect x="7"  y="7" width="69" height="100" fill="#dadfda"/>
+      <!-- the counterfoil: the part that is kept -->
+      <rect x="86" y="7" width="21" height="100" fill="#dadfda"/>
+      <!-- the receipt: the one bar of uncut paper still spanning the tear.
+           a break in the line that does not break the guarantee. -->
+      <rect x="7" y="70" width="100" height="14" fill="#e07b30"/>
+      <!-- the punch, taken out of the edge on the tear line.
+           punch it again and you get the same hole back. -->
+      <ellipse cx="81" cy="7"   rx="15" ry="10" fill="#0a0c0b"/>
+      <ellipse cx="81" cy="107" rx="15" ry="10" fill="#0a0c0b"/>
+    </svg>
+  </div>
+</div>
+
+<div class="word">AXIOM</div>
+
+<div class="meta">RECEIPT   COMMITTED BEFORE THE EFFECT
+KEY       IDENTICAL ON EVERY RETRY
+EPOCH     MONOTONIC. DEAD WORKERS ARE FENCED
+COMMIT    STATE AND MEMORY, ONE TRANSACTION</div>
+
+<div id="perf"></div>
+<div id="punch"></div>
+
+<div class="pos"><b>EFFECTIVELY-ONCE</b> EXECUTION FOR AGENTS</div>

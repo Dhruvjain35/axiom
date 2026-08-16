@@ -1,0 +1,43 @@
+<meta charset="utf-8">
+<title>AXIOM — unbroken</title>
+<style>
+  html,body{margin:0;padding:0;width:100vw;height:100vh;overflow:hidden;background:#0a0c0b}
+  .card{display:block;width:100vw;height:100vh}
+
+  .wm{font-family:Futura;font-weight:500;font-size:398px;letter-spacing:.15em;fill:#dadfda}
+  .ln{font-family:"SF Mono",Menlo,monospace;font-weight:400;font-size:62px;letter-spacing:.06em;
+      fill:#8e958f}
+  .ln .k{fill:#dadfda}
+
+  /* Lifted out for the favicon, #mark is appended straight to a bare 32px body and scaled about
+     its centre. A grid container falls back to SAFE centring for an item larger than itself,
+     which would pin the tile at 0,0 and throw it off-screen; auto margins won't help because
+     they refuse to go negative in LTR. So when — and only when — the mark is a direct child of
+     body, it centres itself. Inside the card this selector never matches. */
+  body > #mark{position:fixed;left:calc(50% - 250px);top:calc(50% - 250px)}
+</style>
+
+<!-- The card is one SVG so it is resolution-independent: the same composition is exact at
+     1920x1280 and at the 300x200 the gallery actually shows. -->
+<svg class="card" viewBox="0 0 1920 1280" preserveAspectRatio="xMidYMid meet">
+  <rect width="1920" height="1280" fill="#0a0c0b"/>
+
+  <text class="wm" x="152" y="949">AXIOM</text>
+  <text class="ln" x="160" y="1064"><tspan class="k">EFFECTIVELY-ONCE</tspan>, ACROSS A CRASH</text>
+
+  <!-- THE MARK. tile 500, 1 unit = 5px. art occupies units 8..92 x, 23..77 y.
+       Two runs of one line. The second is the first rotated 180 degrees about the centre —
+       the same run, resumed one epoch higher, never lower. -->
+  <svg id="mark" x="120" y="135" width="500" height="500" viewBox="0 0 100 100">
+    <rect width="100" height="100" fill="#0a0c0b"/>
+    <rect x="8"  y="57" width="48" height="20" fill="#dadfda"/>
+    <rect x="44" y="23" width="48" height="20" fill="#dadfda"/>
+    <!-- the crash window: exactly the interval the two runs share -->
+    <rect x="44" y="23" width="12" height="54" fill="#e07b30"/>
+  </svg>
+
+  <!-- the same run arriving from before the frame and leaving after it, in a quieter register.
+       drawn after the mark so each hairline starts exactly at the bar it continues. -->
+  <rect x="0"   y="518" width="160"  height="4" fill="#2a302d"/>
+  <rect x="580" y="348" width="1340" height="4" fill="#2a302d"/>
+</svg>

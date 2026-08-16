@@ -1,0 +1,125 @@
+<meta charset="utf-8">
+<title>AXIOM — fence</title>
+<style>
+  :root{
+    --bg:#0a0c0b; --panel:#0e1110; --raised:#161b19;
+    --rule:#1d2220; --rule2:#2a302d; --rule3:#3a423e;
+    --text:#dadfda; --dim:#8e958f; --faint:#5c635e; --ghost:#3d4441;
+    --ok:#4fb98b; --hot:#e07b30;
+    --s:1;
+  }
+  html,body{margin:0;padding:0;overflow:hidden;background:var(--bg);}
+  body{width:1920px;height:1280px;-webkit-font-smoothing:antialiased;}
+
+  /* Authored at 1920x1280 and scaled to whatever viewport renders it, so the 300px
+     gallery tile is a true reduction of this composition rather than a crop of it. */
+  .card{
+    position:absolute; left:0; top:0; width:1920px; height:1280px;
+    background:var(--bg); transform:scale(var(--s)); transform-origin:0 0;
+  }
+
+  .hrule{position:absolute; left:160px; width:1600px; height:1px; background:var(--rule);}
+  .micro{
+    position:absolute; font-family:"SF Mono",Menlo,monospace; font-size:20px;
+    letter-spacing:.215em; color:var(--faint); text-transform:uppercase; white-space:nowrap;
+  }
+
+  /* ---------- left block ---------- */
+  .col{position:absolute; left:160px; top:260px; width:1600px;}
+  .markbox{position:relative; width:320px; height:320px; margin-left:-21px;}
+  /* left/top 50% plus a negative half-margin keeps the mark centred even when the
+     harness lifts it out of this page and drops it alone into a 32px document. */
+  #mark{
+    position:absolute; left:50%; top:50%;
+    width:320px; height:320px; margin:-160px 0 0 -160px;
+  }
+  #mark svg{display:block; width:320px; height:320px;}
+
+  .word{
+    font-family:Futura,"Futura Medium",sans-serif; font-weight:500;
+    font-size:250px; line-height:1; letter-spacing:.12em;
+    color:var(--text); margin:18px 0 0 -1px; white-space:nowrap;
+  }
+  .line{
+    font-family:Charter,Georgia,serif; font-size:66px; line-height:1;
+    color:var(--dim); margin:41px 0 0 -1px; white-space:nowrap;
+  }
+  .line b{font-weight:400; color:var(--text);}
+
+  /* ---------- right: the epoch ruler ---------- */
+  .axis{position:absolute; left:1760px; top:293px; width:1px; height:673px; background:var(--rule);}
+  .t{position:absolute; height:2px; background:var(--rule3);}
+  .t.fut{background:var(--rule); }
+  .t.live{background:var(--ok); height:4px;}
+  .held{
+    position:absolute; font-family:"SF Mono",Menlo,monospace; font-size:24px;
+    letter-spacing:.14em; color:var(--ok); text-align:right; white-space:nowrap;
+  }
+  .axisname{
+    position:absolute; font-family:"SF Mono",Menlo,monospace; font-size:20px;
+    letter-spacing:.215em; color:var(--faint); text-transform:uppercase;
+    text-align:right; white-space:nowrap;
+  }
+</style>
+
+<div class="card">
+  <div class="micro" style="left:160px; top:102px;">crash-safe execution + memory for agents</div>
+  <div class="micro" style="left:160px; top:102px; width:1600px; text-align:right;">effectively-once, not exactly-once</div>
+  <div class="hrule" style="top:140px;"></div>
+
+  <div class="col">
+    <div class="markbox">
+      <div id="mark">
+        <!-- ink box is exactly x 8..112, y 20..100 — centred in the 120 square, with the
+             two counters (nub above the live rail, gap between the rails) both 20 units,
+             so neither closes up before the other at 32px. -->
+        <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <!-- the rail you arrived on, and the post that rose past it -->
+          <path d="M8 90 H56 V20" stroke="#4fb98b" stroke-width="20"
+                stroke-linecap="butt" stroke-linejoin="miter"/>
+          <!-- the rail that is live now: higher, and longer -->
+          <path d="M46 50 H112" stroke="#4fb98b" stroke-width="20" stroke-linecap="butt"/>
+        </svg>
+      </div>
+    </div>
+    <div class="word">AXIOM</div>
+    <div class="line">The refund goes out <b>once</b>, even after a crash.</div>
+  </div>
+
+  <div class="axisname" style="left:1160px; top:247px; width:600px;">lease_epoch</div>
+  <div class="axis"></div>
+
+  <div class="hrule" style="top:1148px;"></div>
+  <div class="micro" style="left:160px; top:1178px; width:1600px; text-align:right;">receipt before effect &nbsp;·&nbsp; one serializable commit &nbsp;·&nbsp; the number only goes up</div>
+
+  <!-- Ticks step 43px. The live one sits at y=393, the exact centreline of the mark's
+       upper rail, so the ruler and the logo state the same epoch. Everything below it is
+       spent and drawn in rule3; the two above it are unissued and drawn in rule. -->
+  <i class="t fut"  style="left:1742px; top:306px; width:18px"></i>
+  <i class="t fut"  style="left:1742px; top:349px; width:18px"></i>
+  <i class="t live" style="left:1714px; top:392px; width:46px"></i>
+  <i class="t" style="left:1734px; top:435px; width:26px"></i>
+  <i class="t" style="left:1734px; top:478px; width:26px"></i>
+  <i class="t" style="left:1734px; top:521px; width:26px"></i>
+  <i class="t" style="left:1734px; top:564px; width:26px"></i>
+  <i class="t" style="left:1734px; top:607px; width:26px"></i>
+  <i class="t" style="left:1734px; top:650px; width:26px"></i>
+  <i class="t" style="left:1734px; top:693px; width:26px"></i>
+  <i class="t" style="left:1734px; top:736px; width:26px"></i>
+  <i class="t" style="left:1734px; top:779px; width:26px"></i>
+  <i class="t" style="left:1734px; top:822px; width:26px"></i>
+  <i class="t" style="left:1734px; top:865px; width:26px"></i>
+  <i class="t" style="left:1734px; top:908px; width:26px"></i>
+  <i class="t" style="left:1734px; top:951px; width:26px"></i>
+  <div class="held" style="left:1160px; top:377px; width:530px;">41 &nbsp;held</div>
+</div>
+
+<script>
+  (function(){
+    function fit(){
+      document.documentElement.style.setProperty('--s', window.innerWidth / 1920);
+    }
+    fit();
+    window.addEventListener('resize', fit);
+  })();
+</script>
