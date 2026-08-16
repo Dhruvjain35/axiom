@@ -33,7 +33,7 @@ pays **$600 for the same order**. AXIOM pays $300. That comparison ships in the 
 | **The case, criterion by criterion** | **[docs/JUDGING.md](docs/JUDGING.md)** — what it does, where to verify it, and the honest limitation, for each of the five judging criteria |
 | **The correctness spec** | [docs/CRASH_WINDOWS.md](docs/CRASH_WINDOWS.md) — one page per crash window, W1–W7 |
 | **"Temporal already does this"** | **[docs/COMPARISON.md](docs/COMPARISON.md)** — Temporal, Restate, DBOS, LangGraph, Letta, and a bare retry, each quoted from its own docs, each with the workloads where you should use it instead |
-| **Run it** | `pytest -q` → **178 passed** · `scripts/chaos_demo.py` → PASS · [Setup](#setup) |
+| **Run it** | `pytest -q` → **260 passed** · `scripts/chaos_demo.py` → PASS · [Setup](#setup) |
 
 ---
 
@@ -198,7 +198,7 @@ duplicates, 62.4 s. The result does not depend on the topology.
 | | |
 | --- | --- |
 | `scripts/preflight.py` | **16/16 blocking gates pass** (17 gates, 1 advisory) |
-| `pytest -q` | **178 passed** — 13 crash-window, 17 invariant, 15 Lambda-worker, 5 recall-plan, 14 schema-sync, 28 resilience |
+| `pytest -q` | **260 passed, 3 skipped** — and they pass with `AWS_*` unset entirely: the suite is hermetic, needs no credentials and no network. The 3 skips are live-AWS tests behind an explicit opt-in, because ambient credentials are not consent to spend. |
 
 The demo **SIGKILL**s a random live worker every 1.8 seconds. Not `SIGTERM` — no signal
 handler runs, no `finally` block runs, no lease is politely released. That is what an OOM
@@ -451,7 +451,7 @@ Verified: 6/6 tasks terminal, 4 refunds, 0 kills, in 2.9 seconds.
 **6. Run the invariant suite.**
 
 ```bash
-./.venv/bin/python -m pytest -q       # 178 passed
+./.venv/bin/python -m pytest -q       # 260 passed, 3 skipped
 ```
 
 The suite does not assert that AXIOM works; it assembles the exact conditions under which the
@@ -686,7 +686,7 @@ Mission Control's footer reads directly rather than inferring from the prose.
 | `axiom/api.py`, `web/` | HTTP API and Mission Control — vanilla JS, no build step, no CDN. |
 | `axiom/audit_mcp.py` | The audit agent: natural-language questions answered in SQL against the live database, under a read-only identity. |
 | `axiom/lambda_worker.py`, `deploy/lambda/` | The AWS deployment: build, deploy, public front door, observability, signed client, cost table. |
-| `tests/` | 178 tests: 13 crash-window, 17 invariant, 15 Lambda-worker, 5 recall-plan, 14 schema-sync, 28 resilience. |
+| `tests/` | 260 tests: crash-window, invariant, Lambda-worker, recall-plan, schema-sync, resilience, Comprehend and SES. Hermetic — no AWS credentials required. |
 | `scripts/chaos_demo.py` | The headline demo. |
 | `scripts/counterexample.py` | The baseline comparison. |
 | `scripts/incumbent_probe.py` | The two-system architecture, modelled with real durable stores, raced against `tasks.recover()`. Arm 2 is a demonstration that the incumbent answer works. |
@@ -739,11 +739,12 @@ marketing document.
   re-seeds rather than empties, each route has a minimum interval (reset: 15 s), and
   nothing there can create unbounded work — so a stranger can reset the board, not destroy
   it. Set `AXIOM_DEMO_TOKEN` in the function's environment to close it.
-- **No CI.** The 178 tests pass on the local node (43 s); the 64 tests that predate the
-  resilience suite also passed against CockroachDB Cloud (222 s). All seven crash windows
-  have a test, but nothing runs them on every commit. "Passes when a
-  human runs it" is weaker than "cannot regress" — which is precisely the property this
-  project sells.
+- **CI runs the real thing, not a mock.** `.github/workflows/ci.yml` stands up a real
+  CockroachDB v25.4.14 service on every push and pull request, applies the migrations in
+  order (001 → 003 → 002 → 004 → 005), runs all 260 tests, then runs `chaos_demo.py`
+  under real SIGKILLs, then runs `preflight.py` to assert the vector index is still the
+  chosen plan. A suite that only proves things on a laptop proves them to one person.
+
 - **The provider is simulated.** It implements Stripe's idempotency semantics faithfully (same
   key + same fingerprint replays; same key + different fingerprint is rejected with 409) in a
   separate database over a separate connection, but it is not Stripe. No real money moved.
