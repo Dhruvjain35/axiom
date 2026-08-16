@@ -237,14 +237,28 @@ https://github.com/Dhruvjain35/axiom/blob/master/LICENSE
   [cockroachlabs/cockroachdb-skills#23](https://github.com/cockroachlabs/cockroachdb-skills/pull/23),
   open and not merged, so we do not count it*
 
-## ✱ Which AWS Services are used?  *(must select ≥ 1 — we use 6)*
+## ✱ Which AWS Services are used?  *(must select ≥ 1)*
 
-- ☑ **AWS Lambda**
-- ☑ **Amazon API Gateway**
-- ☑ **Amazon EventBridge (Scheduler)**
-- ☑ **Amazon CloudWatch**
-- ☑ **Amazon SNS**
-- ☑ **AWS X-Ray**
+**This field is a fixed list, not free text.** The only options offered are: Amazon Bedrock,
+AWS Lambda, Amazon ECS / EKS, Amazon S3, Amazon SageMaker, Amazon Bedrock Agents, Other AWS
+service. Five of the six services we actually run have no option of their own, so:
+
+- ☑ **AWS Lambda** — runs the agent workers and the API
+- ☑ **Other AWS service** — API Gateway, EventBridge Scheduler, CloudWatch, SNS, X-Ray
+
+Nothing else. Specifically **not**:
+
+| Option | Why not |
+| --- | --- |
+| Amazon Bedrock | Titan V2 answers, but on-demand quota is 0.0 req/min (`L-26C560CE`, `Adjustable=FALSE`) in three regions — 0 of 10 calls in a sustained probe. Embeddings run on a local model. Ticking this would claim a service the repo documents as unusable. |
+| Amazon S3 | No buckets exist on the account. `deploy/lambda/build.sh` deliberately keeps the package under the 50 MB direct-upload limit specifically so no bucket is needed. |
+| Amazon ECS / EKS | Terraform is in `deploy/ecs/` and was never applied — Fargate + ALB is ~$26/mo. |
+| Amazon SageMaker | Not used at all. |
+| Amazon Bedrock Agents | Not used at all. AXIOM *is* the agent runtime; that is the project. |
+
+The five unlisted services are named in the integration answer below, on screen in the
+video, and in the product's own footer — so "Other AWS service" resolves to something a
+judge can check rather than take on faith.
 
 ## ✱ How did you meaningfully integrate the CockroachDB and AWS components?
 
