@@ -225,7 +225,7 @@ https://github.com/Dhruvjain35/axiom
 ## ✱ URL to your open-source license file
 
 ```
-https://github.com/Dhruvjain35/axiom/blob/main/LICENSE
+https://github.com/Dhruvjain35/axiom/blob/master/LICENSE
 ```
 
 ## ✱ Which CockroachDB tools are used?  *(must select ≥ 2 — we use 3)*
